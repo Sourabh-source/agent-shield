@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
+import hashlib
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 from pydantic import BaseModel, Field
@@ -7,6 +8,17 @@ from pydantic import BaseModel, Field
 
 def current_iso_time() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def compute_evidence_digest(stdout: str = "", stderr: str = "", exit_code: int = 0) -> str:
+    """Computes a deterministic SHA-256 digest of execution outputs to bind evidence to execution."""
+    hasher = hashlib.sha256()
+    hasher.update(str(exit_code).encode("utf-8"))
+    hasher.update(b":")
+    hasher.update((stdout or "").encode("utf-8", errors="replace"))
+    hasher.update(b":")
+    hasher.update((stderr or "").encode("utf-8", errors="replace"))
+    return hasher.hexdigest()
 
 
 class WorkflowStatus(str, Enum):
@@ -34,6 +46,7 @@ class StepStatus(str, Enum):
     RECOVERING = "RECOVERING"
     SKIPPED = "SKIPPED"
     VERIFIED_SUCCESS = "VERIFIED_SUCCESS"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class StepType(str, Enum):
@@ -82,6 +95,8 @@ class FailureType(str, Enum):
     TIMEOUT = "TIMEOUT"
     REPOSITORY_ERROR = "REPOSITORY_ERROR"
     TOOL_ERROR = "TOOL_ERROR"
+    RESOURCE_LIMIT = "RESOURCE_LIMIT"
+    SYNTAX_ERROR = "SYNTAX_ERROR"
     UNKNOWN_ERROR = "UNKNOWN_ERROR"
 
 
@@ -90,6 +105,7 @@ class FailureClassification(BaseModel):
     reason: str = ""
     confidence: float = 1.0
     details: Optional[Dict[str, Any]] = None
+    source_evidence: Optional[str] = None
 
 
 class RecoveryPlan(BaseModel):
@@ -116,6 +132,27 @@ class RecoveryAttempt(BaseModel):
 
 # Hand-off models between Member 2, Member 3, and Member 1
 
+class EvidenceType(str, Enum):
+    EXECUTION_OUTPUT = "EXECUTION_OUTPUT"
+    FILESYSTEM_SNAPSHOT = "FILESYSTEM_SNAPSHOT"
+    PROCESS_CHECK = "PROCESS_CHECK"
+    HTTP_RESPONSE = "HTTP_RESPONSE"
+
+
+class EvidenceRecord(BaseModel):
+    """
+    Structured, tamper-evident record binding raw execution evidence to workflow/step execution.
+    """
+    evidence_id: str = Field(default_factory=lambda: str(uuid4())[:8])
+    workflow_id: str
+    step_id: str
+    execution_id: str
+    evidence_type: str = EvidenceType.EXECUTION_OUTPUT.value
+    content_digest: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    collected_at: str = Field(default_factory=current_iso_time)
+
+
 class ExecutionResult(BaseModel):
     """
     Standardized execution output sent from Member 2 to Member 3's Evidence Engine.
@@ -134,10 +171,13 @@ class ExecutionResult(BaseModel):
     timestamp: str = Field(default_factory=current_iso_time)
     workspace: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    evidence_digest: Optional[str] = None
 
     def model_post_init(self, __context: Any) -> None:
         if not self.action:
             self.action = self.step
+        if not self.evidence_digest:
+            self.evidence_digest = compute_evidence_digest(self.stdout, self.stderr, self.exit_code)
 
     @property
     def actual(self) -> Dict[str, Any]:
@@ -152,6 +192,33 @@ class ExecutionResult(BaseModel):
         return {"exit_code": 0}
 
 
+def create_evidence_record(
+    exec_result: ExecutionResult,
+    step_id: str,
+    evidence_type: str = EvidenceType.EXECUTION_OUTPUT.value,
+) -> EvidenceRecord:
+    digest = exec_result.evidence_digest or compute_evidence_digest(
+        exec_result.stdout, exec_result.stderr, exec_result.exit_code
+    )
+    return EvidenceRecord(
+        workflow_id=exec_result.workflow_id,
+        step_id=step_id,
+        execution_id=exec_result.execution_id,
+        evidence_type=evidence_type,
+        content_digest=digest,
+        payload={
+            "command": exec_result.command,
+            "exit_code": exec_result.exit_code,
+            "stdout": exec_result.stdout,
+            "stderr": exec_result.stderr,
+            "duration_ms": exec_result.duration_ms,
+            "workspace": exec_result.workspace,
+            "metadata": exec_result.metadata or {},
+        },
+        collected_at=exec_result.timestamp or current_iso_time(),
+    )
+
+
 class VerificationResult(BaseModel):
     """
     Standardized verification decision received by Member 2 from Member 3.
@@ -164,6 +231,8 @@ class VerificationResult(BaseModel):
     recovery_id: Optional[str] = None
     failure_type: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    execution_id: Optional[str] = None
+    evidence_digest: Optional[str] = None
 
 
 class WorkflowEvent(BaseModel):
@@ -210,6 +279,8 @@ class StepDefinition(BaseModel):
     retries: int = 0
     execution_result: Optional[ExecutionResult] = None
     verification_result: Optional[VerificationResult] = None
+    evidence: Optional[EvidenceRecord] = None
+    evidence_digest: Optional[str] = None
 
 
 class WorkflowCreateRequest(BaseModel):
@@ -269,3 +340,5 @@ class FinalReportData(BaseModel):
     duration_seconds: float
     verification_summary: Dict[str, str] = Field(default_factory=dict)
     recovery_history: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence_records: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence_digests: Dict[str, str] = Field(default_factory=dict)

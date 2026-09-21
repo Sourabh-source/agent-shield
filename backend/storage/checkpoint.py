@@ -40,6 +40,12 @@ class SQLiteCheckpointStorage:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._lock, self._get_conn() as conn:
             cursor = conn.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            except Exception:
+                pass
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS workflows (
                     workflow_id TEXT PRIMARY KEY,
@@ -107,6 +113,12 @@ class SQLiteCheckpointStorage:
                     timestamp TEXT
                 )
             """)
+
+            # Performance & query indexes
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(overall_status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_workflow_events_wid ON workflow_events(workflow_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_workflow_steps_wid ON workflow_steps(workflow_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_recovery_history_wid ON recovery_history(workflow_id)")
             conn.commit()
 
     def save_workflow(self, state: WorkflowState):
@@ -291,13 +303,13 @@ class SQLiteCheckpointStorage:
                 updated_at=row["updated_at"],
             )
 
-    def list_workflows(self, limit: Optional[int] = None) -> List[WorkflowState]:
+    def list_workflows(self, limit: Optional[int] = None, offset: int = 0) -> List[WorkflowState]:
         with self._lock:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 query = "SELECT workflow_id FROM workflows ORDER BY created_at DESC"
                 if limit is not None and limit > 0:
-                    query += f" LIMIT {int(limit)}"
+                    query += f" LIMIT {int(limit)} OFFSET {int(offset)}"
                 cursor.execute(query)
                 rows = cursor.fetchall()
                 w_ids = [r["workflow_id"] for r in rows]
@@ -308,3 +320,15 @@ class SQLiteCheckpointStorage:
                 if wf is not None:
                     workflows.append(wf)
             return workflows
+
+    def delete_workflow(self, workflow_id: str) -> bool:
+        """Permanently deletes a workflow and all its associated steps, events, and recovery history."""
+        with self._lock, self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM workflows WHERE workflow_id = ?", (workflow_id,))
+            deleted_count = cursor.rowcount
+            cursor.execute("DELETE FROM workflow_steps WHERE workflow_id = ?", (workflow_id,))
+            cursor.execute("DELETE FROM workflow_events WHERE workflow_id = ?", (workflow_id,))
+            cursor.execute("DELETE FROM recovery_history WHERE workflow_id = ?", (workflow_id,))
+            conn.commit()
+            return deleted_count > 0

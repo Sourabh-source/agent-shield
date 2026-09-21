@@ -1,8 +1,9 @@
 import logging
 from typing import Optional
-from fastapi import APIRouter, BackgroundTasks, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, status
 
 from backend.agent.orchestrator import WorkflowOrchestrator, workflow_store
+from backend.config import settings
 from backend.models.workflow import (
     ExecuteStepRequest,
     StepStatus,
@@ -27,15 +28,22 @@ def start_workflow(
     orchestrator in the background.
     Supports dry_run and demo_failure_mode options.
     """
-    if not payload.repo_url.strip():
+    repo_url = payload.repo_url.strip()
+    if not repo_url:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="repo_url cannot be empty",
         )
 
+    if repo_url.startswith("-") or any(c in repo_url for c in [";", "|", "&", "`", "$", "\n", "\r"]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or prohibited characters in repository URL",
+        )
+
     orchestrator = WorkflowOrchestrator()
     workflow = orchestrator.create_workflow(
-        repo_url=payload.repo_url.strip(),
+        repo_url=repo_url,
         task=payload.task.strip(),
         dry_run=payload.dry_run,
         demo_failure_mode=payload.demo_failure_mode,
@@ -120,6 +128,7 @@ def resume_workflow(
 def external_verify(
     workflow_id: str,
     payload: VerifyStepRequest,
+    x_agentguard_verify_token: Optional[str] = Header(None, alias="X-AgentGuard-Verify-Token"),
 ) -> WorkflowState:
     """
     Integration hook for Member 3's Evidence Engine.
@@ -127,6 +136,13 @@ def external_verify(
     Routes to the orchestrator state machine to continue, recover/retry, or fail safely.
     Does NOT implement Member 3's verification rules internally.
     """
+    if getattr(settings, "VERIFY_TOKEN", None):
+        if not x_agentguard_verify_token or x_agentguard_verify_token != settings.VERIFY_TOKEN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid or missing X-AgentGuard-Verify-Token header",
+            )
+
     orchestrator = WorkflowOrchestrator()
     try:
         return orchestrator.handle_verification_result(
@@ -135,7 +151,14 @@ def external_verify(
             step_id=payload.step_id,
         )
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        )
+        msg = str(exc)
+        if "not found" in msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=msg,
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=msg,
+            )

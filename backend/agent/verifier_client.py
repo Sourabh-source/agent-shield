@@ -34,6 +34,15 @@ class DeterministicEvidenceVerifier(VerificationClient):
     """
 
     def verify(self, execution_result: ExecutionResult) -> VerificationResult:
+        result = self._evaluate(execution_result)
+        if execution_result:
+            if not result.execution_id and getattr(execution_result, "execution_id", None):
+                result.execution_id = execution_result.execution_id
+            if not result.evidence_digest and getattr(execution_result, "evidence_digest", None):
+                result.evidence_digest = execution_result.evidence_digest
+        return result
+
+    def _evaluate(self, execution_result: ExecutionResult) -> VerificationResult:
         logger.info(
             f"DeterministicEvidenceVerifier evaluating step '{execution_result.step}' (exit_code={execution_result.exit_code})"
         )
@@ -222,9 +231,18 @@ class DeterministicEvidenceVerifier(VerificationClient):
                         retry_allowed=True,
                         failure_type="TEST_FAILURE",
                     )
+            if not combined_logs.strip():
+                return VerificationResult(
+                    verified=False,
+                    reason="Test verification failed: zero test execution evidence captured (empty output)",
+                    recovery_required=True,
+                    recovery_action="pip install pytest",
+                    retry_allowed=True,
+                    failure_type="TEST_FAILURE",
+                )
             return VerificationResult(
                 verified=True,
-                reason=f"Tests verified: test execution completed successfully without failures",
+                reason="Tests verified: test execution completed successfully without failures",
                 recovery_required=False,
             )
 
@@ -266,13 +284,31 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     retry_allowed=True,
                     failure_type="PORT_ERROR",
                 )
+            pid = metadata.get("pid")
             return VerificationResult(
                 verified=True,
-                reason="Application startup verified: process started successfully",
+                reason=f"Application startup verified: process running (PID: {pid})" if pid else "Application startup verified: process started successfully",
                 recovery_required=False,
             )
 
-        # G. Generic / Clone / Analyze / Final Report Verification
+        # G. Clone Verification
+        if "clone" in step_name:
+            cloned_count = metadata.get("cloned_files_count")
+            if cloned_count is not None and cloned_count == 0 and "empty" in stderr.lower():
+                return VerificationResult(
+                    verified=False,
+                    reason="Repository clone failed: destination directory is empty",
+                    recovery_required=False,
+                    retry_allowed=False,
+                    failure_type="REPOSITORY_ERROR",
+                )
+            return VerificationResult(
+                verified=True,
+                reason=f"Repository clone verified: files present in workspace" if cloned_count is None else f"Repository clone verified: {cloned_count} files present in workspace",
+                recovery_required=False,
+            )
+
+        # H. Generic / Analyze / Final Report Verification
         return VerificationResult(
             verified=True,
             reason=f"Step '{execution_result.step}' passed machine-checked evidence verification",
@@ -338,6 +374,8 @@ class UnavailableVerifierClient(VerificationClient):
             recovery_required=False,
             retry_allowed=False,
             metadata={"verifier_unavailable": True, "error": "unconfigured_verifier_url"},
+            execution_id=execution_result.execution_id if execution_result else None,
+            evidence_digest=getattr(execution_result, "evidence_digest", None) if execution_result else None,
         )
 
 

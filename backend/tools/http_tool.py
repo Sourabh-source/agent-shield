@@ -1,5 +1,6 @@
 import time
 from typing import Optional
+from urllib.parse import urlparse
 import httpx
 
 from backend.models.workflow import ExecutionResult, current_iso_time
@@ -16,6 +17,25 @@ def perform_health_check(
     Returns structured ExecutionResult:
     exit_code == 0 if response status is 2xx, 1 otherwise.
     """
+    # SSRF Protection: block cloud metadata service IP/hostnames
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+        if hostname in ["169.254.169.254", "metadata.google.internal", "metadata", "instance-data"]:
+            return ExecutionResult(
+                workflow_id=workflow_id,
+                step="health_check",
+                step_id=step_id,
+                command=f"GET {url}",
+                exit_code=126,
+                stdout="",
+                stderr="Security blocked: Access to cloud instance metadata service is prohibited (SSRF prevention).",
+                workspace=None,
+                metadata={"security_blocked": True},
+            )
+    except Exception:
+        pass
+
     start_time = time.perf_counter()
     try:
         with httpx.Client(timeout=timeout_seconds) as client:
@@ -37,6 +57,12 @@ def perform_health_check(
                 else f"HTTP {response.status_code} Error from {url}\n{body_snippet}"
             )
 
+            # Redact sensitive response headers
+            safe_headers = {
+                k: ("***REDACTED***" if k.lower() in ["set-cookie", "authorization"] else v)
+                for k, v in response.headers.items()
+            }
+
             return ExecutionResult(
                 workflow_id=workflow_id,
                 step="health_check",
@@ -50,7 +76,7 @@ def perform_health_check(
                 metadata={
                     "url": url,
                     "status_code": response.status_code,
-                    "headers": dict(response.headers),
+                    "headers": safe_headers,
                 },
             )
 

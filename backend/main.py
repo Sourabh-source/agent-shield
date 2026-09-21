@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api import status_router, workflow_router
 from backend.config import settings
+from backend.observability import ObservabilityMiddleware
 
 # Configure logging
 logging.basicConfig(
@@ -21,11 +22,15 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Observability middleware: tracing, correlation IDs, and timing
+app.add_middleware(ObservabilityMiddleware)
+
 # CORS middleware for Member 1 frontend integration
+allow_creds = "*" not in settings.CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=allow_creds,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -14,8 +14,10 @@ from backend.tools.base_tool import BaseTool
 # Block dangerous commands to prevent host system damage
 BLOCKED_PATTERNS = [
     r"\brm\s+-(?:rf|fr)\s+[/~]",                   # rm -rf / or ~
+    r"\brm\s+-(?:rf|fr)\s+/\*",                    # rm -rf /*
     r"\brmdir\s+/[sS]\s+/[qQ]\s+[cC]:\\",          # rmdir /s /q c:\
     r"\bdel\s+/[fF]\s+/[sS]\s+/[qQ]\s+[cC]:\\",    # del /f /s /q c:\
+    r"Remove-Item\s+.*-Recurse\s+.*[cC]:\\",       # powershell delete C:
     r"\bformat\s+[a-zA-Z]:",                       # format c:
     r"\bmkfs\b",                                   # mkfs
     r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:",   # fork bomb
@@ -23,6 +25,7 @@ BLOCKED_PATTERNS = [
     r"\breboot\b",                                 # reboot
     r">\s*/dev/sd[a-z]",                          # disk overwrite
     r"\bdd\s+if=.*of=/dev/",                       # dd disk write
+    r"(?:curl|wget)\s+.*\|\s*(?:bash|sh|cmd|powershell)", # piped remote script execution
 ]
 
 # Sensitive patterns to redact from logs/outputs
@@ -167,8 +170,15 @@ def execute_shell_command(
             path.mkdir(parents=True, exist_ok=True)
         resolved_cwd = str(path)
 
-    # Merge environment variables
-    proc_env = os.environ.copy()
+    # Merge environment variables with secret filtering to prevent host credential leaks
+    SENSITIVE_ENV_PATTERNS = (
+        "GEMINI_", "AWS_", "GITHUB_", "SECRET_", "TOKEN_",
+        "PRIVATE_", "PASSWORD_", "CREDENTIALS_", "API_KEY",
+    )
+    proc_env = {
+        k: v for k, v in os.environ.items()
+        if not any(k.upper().startswith(p) or k.upper().endswith(p) for p in SENSITIVE_ENV_PATTERNS)
+    }
     if env:
         proc_env.update(env)
 

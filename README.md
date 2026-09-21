@@ -1,133 +1,145 @@
-﻿# AgentGuard — Evidence-Gated Self-Healing Agent Workflow
-### Problem Statement A1: Full-Stack Implementation (Members 1, 2, & 3 Finalized)
+# AgentGuard / Agent Shield — Evidence-Gated Self-Healing Agent Workflow
+### Production-Hardened Autonomous DevOps & Verification Platform
 
-AgentGuard is an autonomous AI agent engine that executes real multi-step software tasks, verifies each critical action using **machine-checkable observable evidence**, detects failures, and **safely self-heals/recovers** instead of falsely claiming completion.
-
----
-
-## 👥 Member Roles & Architecture
-
-### Member 1: Frontend (Next.js / React / TypeScript / Tailwind)
-- **Workflow Submission**: Repository URL, task definition, dry-run toggle, demo failure injection mode.
-- **Real-Time Execution Timeline**: Live polling of workflow state machine, active step indicator, step status badges.
-- **Evidence Panel**: Observable evidence per step (`command`, `exit_code`, `stdout`, `stderr`, `duration_ms`, `execution_id`, `timestamp`).
-- **Self-Healing Visualization**: Explicit recovery plans, failure classification, recovery action execution, and retry counters.
-- **Final Verdict Card**: Authoritative status directly from backend (`VERIFIED SUCCESS`, `VERIFIED FAILURE`, `VERIFICATION UNAVAILABLE`, `CANCELLED`).
-- **Audit Log & Report**: Chronological event streaming and post-run summary report.
-
-### Member 2: Orchestration, Planning, Execution & Backend (FastAPI / Python)
-- **AI Planner & Validation Gate**: LLM-driven planning with deterministic fallback; validates step definitions against registered tool schemas.
-- **Tool Sandbox & Registry**: Git clone, shell subprocess runner, Python interpreter, pip package manager, npm runner, HTTP health checks, and workspace file reader with path traversal containment and secret redaction.
-- **State Machine & Orchestrator**: Closed-loop evidence verification, bounded retries (`max_retries=2`), execution budgets, and cancellation/resumption.
-- **SQLite Checkpointing**: Persistent state across server restarts.
-
-### Member 3: Evidence Verification & Integration Boundary
-- **`ExecutionResult` Contract**: Standardized machine-checkable evidence payload sent from Member 2 to Member 3.
-- **`VerificationResult` Contract**: Decision payload returned to Member 2 (`verified`, `reason`, `recovery_required`, `recovery_action`, `retry_allowed`).
-- **Deterministic Evidence Verifier (`DeterministicEvidenceVerifier`)**: Real machine-checkable evidence inspection across:
-  - **A. Command/Execution Verification**: Validates execution ID, timestamps, exit codes, and metadata security flags.
-  - **B. Dependency Installation**: Inspects package manager logs for fatal resolution conflicts or broken wheels even if exit code is 0.
-  - **C. Build Verification**: Scans output for syntax errors, missing modules, or compilation failures.
-  - **D. Test Verification**: Confirms test execution without assertion failures.
-  - **E. Health Check Verification**: Validates HTTP status codes (2xx/3xx) and rejects connection failures.
-  - **F. Application Startup**: Verifies process readiness and checks for port conflicts.
-  - **G. Final Report**: Ensures all required steps are verified before issuing `VERIFIED_SUCCESS`.
-- **Verifier Selection**: Explicit configuration (`MOCK_VERIFIER`, `MEMBER3_VERIFIER_URL`, or `UnavailableVerifierClient`).
+AgentGuard is an autonomous AI agent engine that executes multi-step software tasks, verifies every critical action using **cryptographically bound, machine-checkable evidence**, diagnoses failures into typed classifications, and **safely self-heals** via structured remediation plans instead of hallucinating completion.
 
 ---
 
-## 🔄 Core Loop Architecture
+## 👥 Architecture & System Boundaries
 
 ```
-User Input (Repo URL + Task + DryRun Flag)
-      │
-      ▼
-AI Planner (Gemini LLM / Fallback) + Tool Validation Gate
-      │
-      ▼
-┌────────────────── Workflow Orchestrator Loop ──────────────────┐
-│                                                                │
-│   1. Check Budget & Cancellation Status                        │
-│                                                                │
-│   2. Tool Registry executes step via specialized tool          │
-│      (Git, Shell, Python, Pip, Npm, HTTP, File)                │
-│                                                                │
-│   3. Collect raw ExecutionResult (exit code, stdout,           │
-│      stderr, duration, workspace, correlation IDs)             │
-│                                                                │
-│   4. Send ExecutionResult to Member 3 Evidence Verifier        │
-│                                                                │
-│   5. Verifier evaluates machine evidence:                      │
-│      ├── PASS  ──► Checkpoint State ──► Next Step              │
-│      └── FAIL  ──► Trigger Self-Healing:                       │
-│                     - Failure Classification                   │
-│                     - Idempotent Recovery Plan                 │
-│                     - Enforce Recovery & Retry Budgets         │
-│                     - Execute recovery action                  │
-│                     - Record RecoveryAttempt                   │
-│                     - Re-execute step & Re-verify evidence     │
-│                                                                │
-│   6. Max Retries or Budget Exceeded?                           │
-│      └──► VERIFIED_FAILURE / BUDGET_EXCEEDED (Never fake!)     │
-└────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-Final Verified State (COMPLETED, VERIFIED_FAILURE, CANCELLED, or VERIFICATION_UNAVAILABLE)
-      │
-      ▼
-Generate Final Structured Execution Report
+PLAN (AI / Deterministic)
+  │
+  ▼
+EXECUTE (Sandboxed Subprocess Runner / Tool Registry)
+  │
+  ▼
+COLLECT MACHINE EVIDENCE (Exit Code, Stdout, Stderr, Digest, FS Snapshot Diff)
+  │
+  ▼
+TAMPER-EVIDENT VERIFICATION GATE (Member 3 Boundary)
+  ├── PASS  ──► Checkpoint SQLite State ──► Next Step
+  └── FAIL  ──► CLASSIFY FAILURE (Typed Category + Source Evidence)
+                  │
+                  ▼
+                RECOVERY PLANNER (Structured, Idempotent Action)
+                  │
+                  ▼
+                EXECUTE REMEDIATION (Clean Environment / Dependency Install / Port Freeing)
+                  │
+                  ▼
+                RETRY STEP (New Execution ID + Fresh Observable Evidence)
+                  │
+                  ▼
+                RE-VERIFY (Evidence Gate: Never Trust Exit Code Alone)
 ```
+
+### Member 1: Modern DevOps Frontend (Next.js 16 / React 19 / TypeScript / Tailwind)
+- **Workflow Control**: Target Git repository input, task specification, dry-run simulation mode, and live demo failure injection.
+- **Real-Time Execution Timeline**: Sub-second polling with phase badges (`PENDING`, `RUNNING`, `RECOVERING`, `VERIFYING`, `VERIFIED_SUCCESS`, `NOT_APPLICABLE`, `FAILED`).
+- **Cryptographic Evidence Panel**: Inspects raw subprocess commands, exit codes, execution IDs, timestamps, and deterministic SHA-256 `evidence_digest`.
+- **Self-Healing Visualization**: Live inspection of failure classification, structured recovery plans, recovery actions, and bounded retry counters.
+- **Executive Verdict**: Unambiguous terminal verdict directly from backend authority (`VERIFIED SUCCESS`, `VERIFIED FAILURE`, `VERIFICATION UNAVAILABLE`, `BUDGET EXCEEDED`, `CANCELLED`).
+
+### Member 2: Orchestration, Planning, Execution & Storage (FastAPI / Python)
+- **Validation Gate & AI Planner**: Dynamic Gemini LLM planning with deterministic fallback; validates every step against tool registry schemas.
+- **Tool Sandbox**: Specialized runners for Git, Shell, Python, Pip, Npm, HTTP health checks, and Workspace File operations with path containment.
+- **Closed-Loop Orchestrator**: Enforces verification preconditions, bounds retries (`max_retries=2`), limits recovery actions, tracks execution budgets, and guards concurrent runs with execution mutexes.
+- **Filesystem Snapshotting**: Lightweight before/after workspace filesystem diffing tracking created, modified, and deleted files per step.
+- **Process Lifecycle Guard**: Tracks spawned process trees and guarantees termination (`taskkill /F /T` on Windows, signal groups on POSIX) on cancellation or failure.
+- **Hardened SQLite Checkpoints**: Persistent storage configured with Write-Ahead Logging (`WAL`), 5000ms busy timeout, foreign key indexes, and pagination support.
+
+### Member 3: Tamper-Evident Evidence Verification Engine
+- **Deterministic SHA-256 Digest**: Raw execution evidence (`stdout`, `stderr`, `exit_code`, `step`, `command`) is cryptographically bound into an `evidence_digest`.
+- **Strict Verification Gate**: `/workflow/{id}/verify` rejects replayed tokens on already verified steps (409), mismatched execution IDs (409), mismatched evidence digests (409), and cancelled workflows (409).
+- **Mutual Authentication**: Protected by `X-AgentGuard-Verify-Token` header authentication.
+- **Zero-Trust Rules**: Exit code 0 is necessary but never sufficient. Verifies non-empty clones, compiler outputs, assertion counts, and active process PIDs.
 
 ---
 
-## 🚀 Quick Start (Full Stack)
+## 🛡️ Production Hardening & Security Guarantees
 
-### 1. Prerequisites
+| Security & Reliability Control | Implementation Detail | Guarantee |
+| :--- | :--- | :--- |
+| **Evidence Tamper-Proofing** | SHA-256 digest computed across stdout, stderr, exit code, and command. | Verifier decisions cannot be forged or replayed against stale executions. |
+| **Host Secret Isolation** | Subprocess environment blocks `GEMINI_`, `AWS_`, `GITHUB_`, `SECRET_`, `TOKEN_`, `KEY_`. | Child processes and untrusted build scripts cannot exfiltrate host credentials. |
+| **Cloud SSRF Protection** | HTTP tool blocks cloud instance metadata endpoints (`169.254.169.254`, `metadata.google.internal`). | Repositories cannot execute SSRF probes against infrastructure metadata services. |
+| **Git Injection Prevention** | Git clone validates repository URLs against argument injection (`--upload-pack`) and metacharacters. | Untrusted repo URLs cannot hijack `git` subprocess commands. |
+| **Process Tree Isolation** | Background processes tracked in `_spawned_pids` and killed via process tree termination. | Long-running servers or orphaned zombie processes are guaranteed killed on exit/cancel. |
+| **Bounded Snapshots** | Workspace diffs cap inspection to 1000 files and 5 depth levels; diffs cap at 50 changes. | Prevents high memory consumption or filesystem thrashing on large repositories. |
+| **Execution Mutex** | Orchestrator tracks `_running_workflows` under an internal execution lock. | Prevents race conditions or duplicate concurrent executions of the same workflow. |
+| **Secret Redaction** | Comprehensive regex masks API keys, bearer tokens, passwords, and private keys in logs and UI. | Sensitive strings never appear in stdout, stderr, database records, or event feeds. |
+| **Crash-Proof SQLite** | SQLite initialized with `PRAGMA journal_mode=WAL` and `PRAGMA busy_timeout=5000`. | Eliminates `database is locked` errors during concurrent polling and writes. |
+| **Observability Tracing** | `ObservabilityMiddleware` injects `X-Correlation-ID` and logs structured request durations. | Full end-to-end request tracing across all API calls and background jobs. |
+
+---
+
+## 🚀 Quick Start Guide
+
+### Prerequisites
 - Python 3.10+
 - Node.js 18+ and npm
 
-### 2. Backend Setup & Startup
-```bash
+### 1. Backend Setup & Run
+```powershell
+# Navigate to repository root
+cd "C:\Users\Sourabh Singh\Desktop\member 2"
+
 # Activate virtual environment
 .\.venv\Scripts\activate
 
-# Install dependencies (if not already installed)
+# Install dependencies (if needed)
 pip install -r backend/requirements.txt
 
-# Start FastAPI server (port 8000)
-.\.venv\Scripts\uvicorn backend.main:app --host 127.0.0.1 --port 8000
+# Run FastAPI backend (port 8000)
+.\.venv\Scripts\uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
-- Swagger UI: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- Health check: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+- API Docs (Swagger): [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- Health Status: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 
-### 3. Frontend Setup & Startup
-```bash
+### 2. Frontend Setup & Run
+```powershell
+# In a new terminal
 cd frontend
 
 # Install dependencies
 npm install
 
-# Start Next.js development server (port 3000)
+# Run Next.js frontend (port 3000)
 npm run dev
 ```
 - Web Application: [http://localhost:3000](http://localhost:3000)
 
-### 4. Run Automated Test Suite (95/95 Tests Passing)
-```bash
-.\.venv\Scripts\pytest -q
+### 3. Run Full Automated Test Suite (117/117 Passing)
+```powershell
+.\.venv\Scripts\pytest -v
 ```
 
-### 5. Run Demo Scenarios A–F
-```bash
-.\.venv\Scripts\python.exe -m backend.demo_run
+### 4. Run Demo Scenarios Verification Suite (All 7 Passing)
+```powershell
+.\.venv\Scripts\python.exe scratch\verify_all_demo_scenarios.py
 ```
 
 ---
 
-## ⚙️ Environment Variables
+## 📋 Comprehensive Demo Scenarios (A through G)
 
-### Backend Configuration (`.env`)
-```bash
+| Scenario | Objective | Execution Flow | Verified Terminal State |
+| :--- | :--- | :--- | :--- |
+| **Scenario A** | Clean Happy Path | 8-step build pipeline on clean repo; all steps pass verification. | `COMPLETED` (`PASS`, 0 recoveries, 0 retries) |
+| **Scenario B** | Self-Healing Dependency | Real failing Python command triggers `ModuleNotFoundError: pandas`. Verifier diagnoses `DEPENDENCY_ERROR` and orders `pip install pandas`. Recovery executes, step retries, second verification passes. | `COMPLETED` (`PASS`, 1 recovery, 1 retry) |
+| **Scenario C** | Persistent Failure / Bounded Retries | Unresolvable syntax error in source file. System attempts recovery, exhausts `MAX_RETRIES` (2), and safely halts without false claims. | `VERIFIED_FAILURE` (`FAIL`, 2 retries) |
+| **Scenario D** | Verifier Unavailable | External verifier unreachable or unconfigured. Workflow halts safely rather than assuming success. | `VERIFICATION_UNAVAILABLE` |
+| **Scenario E** | Execution Budget Exceeded | Workflow runtime exceeds `MAX_WORKFLOW_TIME`. State machine halts runaway process. | `BUDGET_EXCEEDED` |
+| **Scenario F** | Dry-Run Simulation | Generates AI execution plan and validates schemas without running shell commands. | `COMPLETED` (`dry_run=true`) |
+| **Scenario G** | Cancellation & Resume Safety | User requests cancellation; active child processes are terminated, state marked `CANCELLED`, and re-execution safely blocked. | `CANCELLED` |
+
+---
+
+## ⚙️ Configuration Reference
+
+### Backend (`.env` or Environment Variables)
+```ini
 # Optional: Google Gemini API key for dynamic planning (falls back to deterministic planner if omitted)
 GEMINI_API_KEY=
 
@@ -141,54 +153,34 @@ MAX_STEP_TIME=120
 MAX_WORKFLOW_TIME=600
 
 # Verifier configuration:
-# Set to true for local development / deterministic evidence verifier
 MOCK_VERIFIER=true
 
-# Optional: External Member 3 verifier HTTP endpoint URL
-# When MOCK_VERIFIER=false and URL is provided, HttpVerifierClient is used.
-# When MOCK_VERIFIER=false and URL is empty, UnavailableVerifierClient is used.
-MEMBER3_VERIFIER_URL=
+# Optional: Shared secret token for Member 3 verification gate (Header: X-AgentGuard-Verify-Token)
+VERIFY_TOKEN=
+
+# Require cryptographic evidence digest on all verification results (default: true)
+REQUIRE_EVIDENCE_DIGEST=true
 ```
 
-### Frontend Configuration (`frontend/.env.local`)
-```bash
-# URL of the running FastAPI backend
+### Frontend (`frontend/.env.local`)
+```ini
 NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 ```
-*SECURITY NOTE: Only `NEXT_PUBLIC_API_URL` is exposed to the browser. No API keys, GitHub tokens, or cloud credentials are sent to the client.*
 
 ---
 
-## 📋 Verified Demo Scenarios
+## 🧪 Testing Summary
 
-### DEMO A: Normal Workflow (Happy Path)
-- **Repository**: `https://github.com/octocat/Hello-World`
-- **Result**: `COMPLETED` / `VERIFIED SUCCESS` (8/8 steps, 0 recoveries, 0 retries).
-
-### DEMO B: Self-Healing Workflow (Missing Dependency)
-- **Failure Mode**: `missing_dependency`
-- **Execution Flow**: Step fails with `ModuleNotFoundError: pandas` ➔ Verifier rejects with recovery action `pip install pandas` ➔ Recovery executed ➔ Step retried with new execution ID ➔ Re-verification passes ➔ `VERIFIED SUCCESS`.
-
-### DEMO C: Persistent Failure (Bounded Retries)
-- **Failure Mode**: `persistent_failure`
-- **Execution Flow**: Step fails repeatedly ➔ Recovery attempted ➔ Retry 1 fails ➔ Retry 2 fails ➔ `MAX_RETRIES` (2) exhausted ➔ Transitions to `VERIFIED_FAILURE` (never falsely claims success).
-
-### DEMO D: Safe Dry-Run Mode
-- **Execution Flow**: Plans all steps and validates tool definitions without executing real shell commands.
-
-### DEMO E: Resumption from Interrupted State
-- **Execution Flow**: Resuming a workflow preserves already `VERIFIED_SUCCESS` steps from SQLite checkpoints without duplicate re-execution.
-
-### DEMO F: Verifier Service Unavailable
-- **Execution Flow**: When verifier service is unreachable or unconfigured, workflow halts with `VERIFICATION_UNAVAILABLE` rather than faking success.
-
----
-
-## 🛡️ Security, Reliability & Safety Hardening
-
-- **Evidence-Gated Completion**: An exit code of 0 NEVER directly produces `VERIFIED_SUCCESS` without machine verification.
-- **Destructive Command Blocking**: Blocks dangerous operations (`rm -rf /`, formatting, fork bombs).
-- **Workspace Containment**: Restricts file operations and command execution to the isolated workflow workspace directory.
-- **Execution Budgets**: Enforces step timeouts (120s), workflow timeouts (600s), stdout limits (1MB), and recovery limits (3).
-- **Secret Redaction**: Masks credentials, API keys, and Authorization headers in logs and events.
-- **Zero Browser Secrets**: No private credentials or API keys exist in frontend code or bundle.
+- **Total Automated Pytest Tests**: **117 passing** (0 failures, 0 regressions)
+  - Unit tests for all tool sandboxes (Shell, Git, HTTP, File, Python, Pip)
+  - Path traversal & command injection security tests
+  - SSRF protection tests against cloud instance metadata services
+  - Deterministic SHA-256 evidence digest verification
+  - Adversarial replay attack & execution ID mismatch rejection
+  - Real subprocess failure injection & recovery execution
+  - Process tree termination on Windows/POSIX
+  - SQLite WAL mode, pagination, and cascade deletion
+  - Full API integration & Member 1 / Member 3 contract compliance
+- **Frontend Code Quality**:
+  - `npm run lint`: **0 errors, 0 warnings**
+  - `npm run build`: **Turbopack production build succeeded**

@@ -35,6 +35,20 @@ def clone_repository(
     # Sanitize repo_url
     safe_url = redact_secrets(repo_url.strip())
 
+    # Security check: Prevent argument injection (flags starting with -) and command chaining
+    if safe_url.startswith("-") or any(char in safe_url for char in [";", "|", "&", "`", "$", "\n", "\r"]):
+        return ExecutionResult(
+            workflow_id=workflow_id,
+            step="clone_repository",
+            step_id=step_id,
+            command="git clone",
+            exit_code=126,
+            stdout="",
+            stderr="Security blocked: Malicious repository URL argument injection detected.",
+            workspace=str(target_path),
+            metadata={"security_blocked": True},
+        )
+
     # Build clone command
     cmd = f'git clone --depth 1 "{safe_url}" "{str(target_path)}"'
 

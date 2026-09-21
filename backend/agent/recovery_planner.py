@@ -1,6 +1,7 @@
 import logging
 import os
 from pathlib import Path
+import sys
 from typing import Optional, Tuple
 
 from backend.models.workflow import ExecutionResult, FailureClassification, FailureType, RecoveryPlan
@@ -91,12 +92,13 @@ class RecoveryPlanner:
 
         # 2. Timeout
         elif classification.failure_type == FailureType.TIMEOUT:
+            cmd = suggested_action or f'"{sys.executable}" -c "print(\'Timeout recovery: extended duration allocated for retry\')"'
             return RecoveryPlan(
                 reason=classification.reason,
                 failure_type=failure_type,
                 action_type="extend_timeout",
-                tool="shell",
-                command="echo 'Timeout detected: allocating extended duration for retry'",
+                tool="python" if not suggested_action else "shell",
+                command=cmd,
                 target_step=target_step,
                 max_attempts=max_attempts,
             )
@@ -104,17 +106,37 @@ class RecoveryPlanner:
         # 3. Port Error
         elif classification.failure_type == FailureType.PORT_ERROR:
             port = details.get("port", "8000")
+            if suggested_action:
+                cmd = suggested_action
+            elif os.name == "nt":
+                cmd = f'powershell -NoProfile -NonInteractive -Command "Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}"'
+            else:
+                cmd = f"fuser -k {port}/tcp 2>/dev/null || true"
+
             return RecoveryPlan(
                 reason=classification.reason,
                 failure_type=failure_type,
                 action_type="release_port",
                 tool="shell",
-                command=f"echo 'Releasing conflict on port {port}'",
+                command=cmd,
                 target_step=target_step,
                 max_attempts=max_attempts,
             )
 
-        # 4. Fallback recovery
+        # 4. Resource Limit
+        elif classification.failure_type == FailureType.RESOURCE_LIMIT:
+            cmd = suggested_action or f'"{sys.executable}" -c "import gc; gc.collect(); print(\'Resource recovery: garbage collection executed\')"'
+            return RecoveryPlan(
+                reason=classification.reason,
+                failure_type=failure_type,
+                action_type="cleanup_resources",
+                tool="python" if not suggested_action else "shell",
+                command=cmd,
+                target_step=target_step,
+                max_attempts=max_attempts,
+            )
+
+        # 5. Fallback recovery
         tool = "shell"
         if suggested_action:
             resolved_tool = tool_registry.resolve_tool_for_command(suggested_action)

@@ -17,7 +17,7 @@ from backend.tools.git_tool import clone_repository
 from backend.tools.http_tool import perform_health_check
 from backend.tools.project_analyzer import analyze_workspace
 from backend.tools.registry import tool_registry
-from backend.tools.shell_tool import execute_shell_command
+from backend.tools.shell_tool import execute_shell_command, is_safe_command, redact_secrets
 
 logger = logging.getLogger("agentguard.executor")
 
@@ -34,6 +34,7 @@ class ToolExecutor:
         base = workspace_base or settings.WORKSPACE_BASE_DIR
         self.workspace_dir = str((Path(base) / workflow_id).resolve())
         self.background_process: Optional[subprocess.Popen] = None
+        self._spawned_pids: set[int] = set()
 
     def ensure_workspace(self) -> str:
         Path(self.workspace_dir).mkdir(parents=True, exist_ok=True)
@@ -130,6 +131,22 @@ class ToolExecutor:
                     workspace=self.workspace_dir,
                 )
 
+            # Security validation: check for dangerous commands
+            is_safe, block_reason = is_safe_command(cmd)
+            if not is_safe:
+                return ExecutionResult(
+                    workflow_id=self.workflow_id,
+                    step=step.name,
+                    step_id=step.id,
+                    command=redact_secrets(cmd),
+                    exit_code=126,
+                    stdout="",
+                    stderr=f"Security blocked: {block_reason}",
+                    duration_ms=1.0,
+                    workspace=self.workspace_dir,
+                    metadata={"security_blocked": True},
+                )
+
             start_time = time.perf_counter()
             try:
                 self.background_process = subprocess.Popen(
@@ -140,6 +157,8 @@ class ToolExecutor:
                     stderr=subprocess.PIPE,
                     text=True,
                 )
+                if self.background_process.pid:
+                    self._spawned_pids.add(self.background_process.pid)
                 time.sleep(1.5)
                 poll = self.background_process.poll()
                 duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
@@ -239,14 +258,41 @@ class ToolExecutor:
         )
 
     def cleanup(self):
-        """Terminates any background process spawned during workflow execution."""
-        if self.background_process and self.background_process.poll() is None:
-            try:
-                self.background_process.terminate()
-                self.background_process.wait(timeout=3)
-            except Exception:
+        """Terminates any background processes and process trees spawned during workflow execution."""
+        # Clean up tracked process trees
+        for pid in list(self._spawned_pids):
+            if os.name == "nt":
                 try:
-                    self.background_process.kill()
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        capture_output=True,
+                        timeout=5,
+                    )
                 except Exception:
                     pass
+            else:
+                try:
+                    import signal
+                    os.kill(pid, signal.SIGTERM)
+                except Exception:
+                    pass
+        self._spawned_pids.clear()
+
+        # Clean up direct handle
+        if self.background_process:
+            if self.background_process.poll() is None:
+                try:
+                    self.background_process.terminate()
+                    self.background_process.wait(timeout=2)
+                except Exception:
+                    try:
+                        self.background_process.kill()
+                    except Exception:
+                        pass
             self.background_process = None
+
+    def __del__(self):
+        try:
+            self.cleanup()
+        except Exception:
+            pass

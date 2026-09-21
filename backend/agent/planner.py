@@ -179,9 +179,13 @@ def update_plan_with_analysis(
                 step.tool = "pip"
                 step.command = analysis.build_command
                 step.reason = "pyproject.toml or setup.py detected for build/editable installation"
-            else:
+            elif analysis.build_command:
                 step.tool = "shell"
-                step.command = analysis.build_command or "echo 'No build step required'"
+                step.command = analysis.build_command
+                step.reason = "Custom build command detected"
+            else:
+                step.status = StepStatus.NOT_APPLICABLE
+                step.command = None
                 step.reason = "No explicit build command defined in project manifest"
             step.description = f"Build project ({analysis.language})"
 
@@ -194,9 +198,13 @@ def update_plan_with_analysis(
                 step.tool = "python"
                 step.command = analysis.test_command
                 step.reason = f"Tests detected in repository; running via {analysis.test_command}"
-            else:
+            elif analysis.test_command:
                 step.tool = "shell"
-                step.command = analysis.test_command or "echo 'No test command found'"
+                step.command = analysis.test_command
+                step.reason = "Custom test command detected"
+            else:
+                step.status = StepStatus.NOT_APPLICABLE
+                step.command = None
                 step.reason = "No tests detected in project files"
             step.description = f"Run tests ({analysis.test_command or 'none'})"
 
@@ -209,17 +217,28 @@ def update_plan_with_analysis(
                 step.tool = "python"
                 step.command = analysis.start_command
                 step.reason = f"Entry point script detected: {analysis.start_command}"
-            else:
+            elif analysis.start_command:
                 step.tool = "shell"
-                step.command = analysis.start_command or "echo 'No start command found'"
+                step.command = analysis.start_command
+                step.reason = "Custom start command detected"
+            else:
+                step.status = StepStatus.NOT_APPLICABLE
+                step.command = None
                 step.reason = "No entry point script found for service start"
             step.description = f"Start application ({analysis.start_command or 'none'})"
 
         elif step.type == StepType.HEALTH_CHECK.value:
-            step.tool = "http"
-            step.command = analysis.health_check_url or "http://localhost:8000/health"
-            step.reason = f"Probe HTTP readiness on {step.command}"
-            step.description = f"Check {step.command}"
+            start_step = next((s for s in steps if s.type == StepType.START_APPLICATION.value), None)
+            if start_step and start_step.status == StepStatus.NOT_APPLICABLE:
+                step.status = StepStatus.NOT_APPLICABLE
+                step.command = None
+                step.reason = "Health check skipped: application start is not applicable"
+                step.description = "Health check (not applicable)"
+            else:
+                step.tool = "http"
+                step.command = analysis.health_check_url or "http://localhost:8000/health"
+                step.reason = f"Probe HTTP readiness on {step.command}"
+                step.description = f"Check {step.command}"
 
     return steps
 

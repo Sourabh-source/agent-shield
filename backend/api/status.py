@@ -1,6 +1,6 @@
 import logging
-from typing import List
-from fastapi import APIRouter, HTTPException, status
+from typing import List, Optional
+from fastapi import APIRouter, HTTPException, Query, status
 
 from backend.agent.orchestrator import WorkflowOrchestrator, workflow_store
 from backend.models.workflow import FinalReportData, WorkflowEvent, WorkflowState
@@ -65,8 +65,11 @@ def get_workflow_final_report(workflow_id: str) -> FinalReportData:
 
 
 @router.get("/workflows", response_model=List[WorkflowState])
-def list_workflows() -> List[WorkflowState]:
+def list_workflows(
+    limit: Optional[int] = Query(None, ge=1, le=100, description="Maximum number of workflows to return"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+) -> List[WorkflowState]:
     """
-    Lists all active or past workflows.
+    Lists all active or past workflows with pagination support.
     """
-    return workflow_store.list_all()
+    return workflow_store.list_all(limit=limit, offset=offset)

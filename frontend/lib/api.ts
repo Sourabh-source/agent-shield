@@ -19,6 +19,17 @@ export interface WorkflowCreateResponse {
   status: string;
 }
 
+export interface EvidenceRecord {
+  evidence_id: string;
+  workflow_id: string;
+  step_id: string;
+  execution_id: string;
+  evidence_type: string;
+  content_digest: string;
+  payload: Record<string, unknown>;
+  collected_at: string;
+}
+
 export interface StepDefinition {
   id: string;
   type: string;
@@ -30,6 +41,8 @@ export interface StepDefinition {
   retries: number;
   execution_result?: ExecutionResult | null;
   verification_result?: VerificationResult | null;
+  evidence?: EvidenceRecord | null;
+  evidence_digest?: string;
 }
 
 export interface ExecutionResult {
@@ -46,6 +59,7 @@ export interface ExecutionResult {
   timestamp: string;
   workspace?: string;
   metadata?: Record<string, unknown>;
+  evidence_digest?: string;
 }
 
 export interface VerificationResult {
@@ -57,6 +71,8 @@ export interface VerificationResult {
   recovery_id?: string;
   failure_type?: string;
   metadata?: Record<string, unknown>;
+  execution_id?: string;
+  evidence_digest?: string;
 }
 
 export interface WorkflowEvent {
@@ -117,6 +133,8 @@ export interface FinalReportData {
   duration_seconds: number;
   verification_summary: Record<string, string>;
   recovery_history: Record<string, unknown>[];
+  evidence_records?: Record<string, unknown>[];
+  evidence_digests?: Record<string, string>;
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -155,7 +173,13 @@ export const api = {
   resumeWorkflow: (workflowId: string): Promise<WorkflowState> =>
     request(`/workflow/${workflowId}/resume`, { method: "POST" }),
 
-  listWorkflows: (): Promise<WorkflowState[]> => request("/workflows"),
+  listWorkflows: (limit?: number, offset?: number): Promise<WorkflowState[]> => {
+    const params = new URLSearchParams();
+    if (limit) params.set("limit", String(limit));
+    if (offset) params.set("offset", String(offset));
+    const qs = params.toString();
+    return request(`/workflows${qs ? `?${qs}` : ""}`);
+  },
 
   health: (): Promise<Record<string, unknown>> => request("/health"),
 };
@@ -192,6 +216,8 @@ export function statusColor(status: string): string {
     case "BUDGET_EXCEEDED":
     case "VERIFICATION_UNAVAILABLE":
       return "text-red-400";
+    case "NOT_APPLICABLE":
+      return "text-zinc-500";
     case "CANCELLED":
     case "CANCEL_REQUESTED":
       return "text-gray-400";
@@ -219,6 +245,8 @@ export function statusBg(status: string): string {
     case "BUDGET_EXCEEDED":
     case "VERIFICATION_UNAVAILABLE":
       return "bg-red-900/40 border-red-700";
+    case "NOT_APPLICABLE":
+      return "bg-zinc-800/40 border-zinc-700";
     case "CANCELLED":
     case "CANCEL_REQUESTED":
       return "bg-gray-800/40 border-gray-600";
