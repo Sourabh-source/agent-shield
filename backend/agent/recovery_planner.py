@@ -6,13 +6,14 @@ import shlex
 import socket
 import subprocess
 import sys
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from backend.config import settings
 from backend.models.workflow import (
     ExecutionResult,
     FailureClassification,
     FailureType,
+    RecoveryAttempt,
     RecoveryOutcome,
     RecoveryPlan,
     StepDefinition,
@@ -155,34 +156,93 @@ class RecoveryPlanner:
         self,
         plan: RecoveryPlan,
         workspace_dir: Optional[str] = None,
+        step: Optional[StepDefinition] = None,
     ) -> bool:
         """
         Idempotent State Check:
-        Verifies if the intended recovery condition is already satisfied in the workspace.
-        Only checks workspace node_modules or site-packages to prevent directory name poisoning.
+        Verifies if the intended recovery condition is already satisfied in the workspace/environment.
+        Prevents redundant recovery executions across all action types.
         """
-        if not workspace_dir or not plan:
+        if not plan:
+            return False
+
+        # 1. Port actions: release_port or relocate_port
+        if plan.action_type in ("release_port", "relocate_port"):
+            target_port_str = plan.postcondition_target or (str(plan.new_port) if plan.new_port else None)
+            if target_port_str:
+                try:
+                    port = int(target_port_str)
+                    if not is_port_in_use(port):
+                        # If relocate_port, also verify step command has been updated
+                        if plan.action_type == "relocate_port":
+                            if step and step.command and str(port) not in step.command:
+                                return False
+                        logger.info(f"State check: port {port} is already free. Skipping redundant port action.")
+                        return True
+                except (ValueError, TypeError):
+                    pass
+
+        # 2. Timeout action: extend_timeout
+        if plan.action_type == "extend_timeout":
+            if step and step.timeout_seconds is not None and plan.timeout_override is not None:
+                if step.timeout_seconds >= plan.timeout_override:
+                    logger.info(f"State check: step timeout ({step.timeout_seconds}s) is already >= target ({plan.timeout_override}s).")
+                    return True
+
+        # 3. Workspace-dependent checks:
+        if not workspace_dir:
             return False
 
         ws = Path(workspace_dir).resolve()
         if not ws.exists():
             return False
 
-        # Check Node module in node_modules
+        # Check Node module in node_modules (must be non-empty and contain package.json or files)
         if plan.action_type == "install_dependency" and plan.tool == "npm":
-            module = (plan.postcondition_target or plan.command.replace("npm install", "").strip().split()[0])
-            node_modules = ws / "node_modules" / module
-            if node_modules.exists():
-                logger.info(f"State check: {module} already exists in node_modules. Skipping redundant install.")
-                return True
+            module = (plan.postcondition_target or (plan.command.replace("npm install", "").strip().split()[0] if plan.command else ""))
+            if module:
+                node_modules = ws / "node_modules" / module
+                if node_modules.is_dir():
+                    # Must contain package.json or be a non-empty directory to prevent empty poisoned directory
+                    if (node_modules / "package.json").is_file() or any(node_modules.iterdir()):
+                        logger.info(f"State check: {module} already exists and is valid in node_modules. Skipping redundant install.")
+                        return True
 
         # Check Python module in site-packages within workspace (not bare repo directories)
         if plan.action_type == "install_dependency" and plan.tool == "pip":
-            module = (plan.postcondition_target or plan.command.replace("pip install", "").strip().split()[0])
-            for sp in ws.glob("**/site-packages"):
-                if (sp / module).is_dir() or (sp / f"{module}.py").is_file():
-                    logger.info(f"State check: {module} already exists in workspace site-packages. Skipping redundant install.")
-                    return True
+            module = (plan.postcondition_target or (plan.command.replace("pip install", "").strip().split()[0] if plan.command else ""))
+            if module:
+                for sp in ws.glob("**/site-packages"):
+                    if (sp / module).is_dir() or (sp / f"{module}.py").is_file():
+                        logger.info(f"State check: {module} already exists in workspace site-packages. Skipping redundant install.")
+                        return True
+
+        return False
+
+    def is_action_futile(
+        self,
+        plan: RecoveryPlan,
+        recovery_history: Optional[List[RecoveryAttempt]] = None,
+    ) -> bool:
+        """
+        Per-workflow recovery ledger check:
+        Determines whether the exact same recovery action has already been attempted in this
+        workflow and resulted in a failure. Conserves retry budget and prevents repeated futile recovery.
+        """
+        if not plan or not recovery_history:
+            return False
+
+        for attempt in recovery_history:
+            same_step = attempt.step_name == plan.target_step
+            failed = attempt.status in (RecoveryOutcome.FAILED, "FAILED", RecoveryOutcome.UNRECOVERABLE, "UNRECOVERABLE")
+
+            if same_step and attempt.action == plan.command and failed:
+                logger.warning(
+                    f"Recovery ledger: Action '{plan.command}' for step '{plan.target_step}' "
+                    f"was already attempted (status={attempt.status}) and failed. "
+                    "Halting repeated futile action."
+                )
+                return True
 
         return False
 

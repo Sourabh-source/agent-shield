@@ -631,6 +631,46 @@ class WorkflowOrchestrator:
                                 workflow_store.save(workflow)
                                 return workflow
 
+                            # Check ledger for repeated futile recovery action
+                            if recovery_planner.is_action_futile(rec_plan, workflow.recovery_history):
+                                logger.warning(
+                                    f"Recovery action '{rec_plan.command}' was previously attempted and failed in workflow {workflow.workflow_id}. "
+                                    "Escalating as unrecoverable to prevent futile loops."
+                                )
+                                step.status = StepStatus.FAILED
+                                workflow.overall_status = WorkflowStatus.VERIFIED_FAILURE
+                                workflow.final_result = (
+                                    f"Workflow halted at step '{step.name}' with VERIFIED FAILURE: "
+                                    f"Recovery action was already attempted and failed ({rec_plan.command or rec_plan.action_type})."
+                                )
+                                attempt = RecoveryAttempt(
+                                    recovery_id=rec_plan.recovery_id,
+                                    step_name=step.name,
+                                    failure_type=rec_plan.failure_type,
+                                    action=rec_plan.command or rec_plan.action_type,
+                                    status=RecoveryOutcome.UNRECOVERABLE,
+                                    exit_code=1,
+                                    duration_ms=0.0,
+                                    step_resolved=False,
+                                )
+                                workflow.recovery_history.append(attempt)
+                                recovery_attempts_total.labels(failure_type=rec_plan.failure_type, outcome="unrecoverable").inc()
+                                self.emit_event(
+                                    workflow,
+                                    EventType.WORKFLOW_FAILED,
+                                    step=step.name,
+                                    step_id=step.id,
+                                    execution_id=exec_result.execution_id,
+                                    status=WorkflowStatus.VERIFIED_FAILURE.value,
+                                    message=workflow.final_result,
+                                    evidence={
+                                        "failed_step": step.name,
+                                        "repeated_futile_action": rec_plan.command or rec_plan.action_type,
+                                    },
+                                )
+                                workflow_store.save(workflow)
+                                return workflow
+
                             # Apply any step-level overrides (such as extended timeout or relocated port)
                             if rec_plan.action_type == "extend_timeout" and rec_plan.timeout_override:
                                 step.timeout_seconds = rec_plan.timeout_override
@@ -638,7 +678,7 @@ class WorkflowOrchestrator:
                                 step.command = rec_plan.rewritten_command
 
                             # Check if recovery is already satisfied (idempotent check)
-                            if recovery_planner.is_action_already_satisfied(rec_plan, executor.workspace_dir):
+                            if recovery_planner.is_action_already_satisfied(rec_plan, executor.workspace_dir, step=step):
                                 logger.info("Recovery condition already satisfied. Proceeding to retry directly.")
                             else:
                                 self.emit_event(
