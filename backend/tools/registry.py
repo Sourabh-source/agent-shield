@@ -6,6 +6,7 @@ from backend.tools.base_tool import BaseTool
 from backend.tools.file_tool import FileTool
 from backend.tools.git_tool import GitTool
 from backend.tools.http_tool import HttpTool
+from backend.tools.notebook_tool import NotebookTool
 from backend.tools.npm_tool import NpmTool
 from backend.tools.pip_tool import PipTool
 from backend.tools.python_tool import PythonTool
@@ -32,6 +33,7 @@ class ToolRegistry:
         self.register("pip", PipTool())
         self.register("http", HttpTool())
         self.register("file", FileTool())
+        self.register("notebook", NotebookTool())
 
     def register(self, name: str, tool: BaseTool):
         self._tools[name.lower()] = tool
@@ -57,6 +59,8 @@ class ToolRegistry:
             return self.get("npm") or self._tools["shell"]
         elif any(cmd.startswith(k) for k in ["python ", "python3 ", "pytest ", "py "]):
             return self.get("python") or self._tools["shell"]
+        elif cmd.endswith(".ipynb") or any(cmd.startswith(k) for k in ["execute_notebook", "run_notebook"]):
+            return self.get("notebook") or self._tools["shell"]
         elif cmd.startswith("http://") or cmd.startswith("https://") or cmd.startswith("get http"):
             return self.get("http") or self._tools["shell"]
         return self.get(default_tool) or self._tools["shell"]

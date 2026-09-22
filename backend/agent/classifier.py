@@ -56,8 +56,9 @@ def classify_failure(exec_result: ExecutionResult) -> FailureClassification:
             source_evidence=webpack_mod.group(0),
         )
     elif "ModuleNotFoundError" in combined or "ImportError" in combined:
+        f_type = FailureType.IMPORT_ERROR if (exec_result.step and "import" in exec_result.step.lower()) else FailureType.DEPENDENCY_ERROR
         return FailureClassification(
-            failure_type=FailureType.DEPENDENCY_ERROR,
+            failure_type=f_type,
             reason="Python import/module dependency error",
             confidence=0.90,
             details={"ecosystem": "python"},
@@ -77,12 +78,13 @@ def classify_failure(exec_result: ExecutionResult) -> FailureClassification:
             source_evidence=port_conflict_match.group(0),
         )
 
-    # 4. Network errors
-    net_match = re.search(r"(connection refused|ConnectError|ETIMEDOUT|ENOTFOUND|Could not resolve host)", combined, re.IGNORECASE)
+    # 4. Network / Health check errors
+    net_match = re.search(r"(connection refused|ConnectError|ETIMEDOUT|ENOTFOUND|Could not resolve host|HTTP [45]\d{2}|status code [45]\d{2})", combined, re.IGNORECASE)
     if net_match:
+        f_type = FailureType.HEALTH_CHECK_FAILURE if (exec_result.step and "health" in exec_result.step.lower()) else FailureType.NETWORK_ERROR
         return FailureClassification(
-            failure_type=FailureType.NETWORK_ERROR,
-            reason="Network connectivity failure or remote host unreachable",
+            failure_type=f_type,
+            reason="Health check endpoint connection failed or returned error status" if f_type == FailureType.HEALTH_CHECK_FAILURE else "Network connectivity failure or remote host unreachable",
             confidence=0.92,
             source_evidence=net_match.group(0),
         )
@@ -138,7 +140,15 @@ def classify_failure(exec_result: ExecutionResult) -> FailureClassification:
             source_evidence=res_match.group(0),
         )
 
-    # 10. Build errors
+    # 10. Build & Syntax errors
+    if exec_result.step and "compile" in exec_result.step.lower() and any(k in combined for k in ["SyntaxError", "IndentationError", "TabError"]):
+        return FailureClassification(
+            failure_type=FailureType.SYNTAX_ERROR,
+            reason=f"Source code syntax error detected: {next((l for l in combined.splitlines() if 'SyntaxError' in l or 'IndentationError' in l), 'Syntax error')}",
+            confidence=0.95,
+            source_evidence="SyntaxError",
+        )
+
     build_match = re.search(r"(SyntaxError|compilation error|build error|tsc: command failed)", combined, re.IGNORECASE)
     if build_match:
         return FailureClassification(
@@ -146,6 +156,16 @@ def classify_failure(exec_result: ExecutionResult) -> FailureClassification:
             reason="Source code syntax or compilation failure",
             confidence=0.91,
             source_evidence=build_match.group(0),
+        )
+
+    # 11. Runtime failures
+    if "traceback (most recent call last):" in combined.lower():
+        f_type = FailureType.RUNTIME_FAILURE if (exec_result.step and any(k in exec_result.step.lower() for k in ["start", "run", "notebook", "app"])) else FailureType.BUILD_ERROR
+        return FailureClassification(
+            failure_type=f_type,
+            reason="Unhandled runtime exception traceback detected",
+            confidence=0.93,
+            source_evidence="Traceback",
         )
 
     # 11. Fallback unknown error

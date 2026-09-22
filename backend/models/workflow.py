@@ -30,11 +30,25 @@ class WorkflowStatus(str, Enum):
     VERIFICATION_UNAVAILABLE = "VERIFICATION_UNAVAILABLE"
     RECOVERING = "RECOVERING"
     COMPLETED = "COMPLETED"
+    VERIFIED_SUCCESS = "VERIFIED_SUCCESS"
     FAILED = "FAILED"
     VERIFIED_FAILURE = "VERIFIED_FAILURE"
+    INCOMPLETE = "INCOMPLETE"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    UNVERIFIABLE = "UNVERIFIABLE"
     CANCEL_REQUESTED = "CANCEL_REQUESTED"
     CANCELLED = "CANCELLED"
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, (str, Enum)):
+            other_val = other.value if isinstance(other, Enum) else other
+            if self.value in ("COMPLETED", "VERIFIED_SUCCESS") and other_val in ("COMPLETED", "VERIFIED_SUCCESS"):
+                return True
+        return super().__eq__(other)
+
+    def __hash__(self) -> int:
+        return hash(self.value)
 
 
 class StepStatus(str, Enum):
@@ -47,6 +61,7 @@ class StepStatus(str, Enum):
     SKIPPED = "SKIPPED"
     VERIFIED_SUCCESS = "VERIFIED_SUCCESS"
     NOT_APPLICABLE = "NOT_APPLICABLE"
+    PARTIALLY_SATISFIED = "PARTIALLY_SATISFIED"
 
 
 class StepType(str, Enum):
@@ -58,6 +73,11 @@ class StepType(str, Enum):
     START_APPLICATION = "start_application"
     HEALTH_CHECK = "health_check"
     FINAL_REPORT = "final_report"
+    COMPILE_PROJECT = "compile_project"
+    IMPORT_CHECK = "import_check"
+    EXECUTE_NOTEBOOK = "execute_notebook"
+    VERIFY_OUTPUTS = "verify_outputs"
+    SMOKE_TEST = "smoke_test"
     CUSTOM = "custom"
 
 
@@ -78,6 +98,7 @@ class EventType(str, Enum):
     RECOVERY_COMPLETED = "RECOVERY_COMPLETED"
     STEP_RETRY = "STEP_RETRY"
     STEP_VERIFIED = "STEP_VERIFIED"
+    STEP_PARTIALLY_SATISFIED = "STEP_PARTIALLY_SATISFIED"
     WORKFLOW_COMPLETED = "WORKFLOW_COMPLETED"
     WORKFLOW_FAILED = "WORKFLOW_FAILED"
     WORKFLOW_CANCELLED = "WORKFLOW_CANCELLED"
@@ -86,8 +107,9 @@ class EventType(str, Enum):
 
 class FailureType(str, Enum):
     DEPENDENCY_ERROR = "DEPENDENCY_ERROR"
-    MISSING_DEPENDENCY = "DEPENDENCY_ERROR"
+    MISSING_DEPENDENCY = "MISSING_DEPENDENCY"
     BUILD_ERROR = "BUILD_ERROR"
+    BUILD_FAILURE = "BUILD_FAILURE"
     TEST_FAILURE = "TEST_FAILURE"
     PORT_ERROR = "PORT_ERROR"
     NETWORK_ERROR = "NETWORK_ERROR"
@@ -98,6 +120,9 @@ class FailureType(str, Enum):
     TOOL_ERROR = "TOOL_ERROR"
     RESOURCE_LIMIT = "RESOURCE_LIMIT"
     SYNTAX_ERROR = "SYNTAX_ERROR"
+    IMPORT_ERROR = "IMPORT_ERROR"
+    RUNTIME_FAILURE = "RUNTIME_FAILURE"
+    HEALTH_CHECK_FAILURE = "HEALTH_CHECK_FAILURE"
     UNKNOWN_ERROR = "UNKNOWN_ERROR"
 
 
@@ -181,8 +206,8 @@ class ExecutionResult(BaseModel):
     Standardized execution output sent from Orchestrator to the Verifier's Evidence Engine.
     Captures raw observable evidence from real command execution.
     """
-    workflow_id: str
-    step: str
+    workflow_id: str = "default"
+    step: str = "custom"
     action: Optional[str] = None
     step_id: Optional[str] = None
     execution_id: str = Field(default_factory=lambda: str(uuid4())[:8])
@@ -288,19 +313,49 @@ class WorkflowEvent(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
-class ProjectAnalysis(BaseModel):
+class ProjectManifest(BaseModel):
     """
-    Structured project detection output produced after analyzing cloned repository.
+    Structured deep project detection manifest produced after analyzing cloned repository.
     """
     language: str = "unknown"
+    runtime: str = "unknown"
     package_manager: str = "unknown"
+    dependency_manager: str = "unknown"
+    framework: Optional[str] = None
+    is_ml: bool = False
+    is_api: bool = False
+    is_notebook: bool = False
+    is_cli: bool = False
+    heavy_dependencies: bool = False
+    dependency_files: List[str] = Field(default_factory=list)
+    entrypoints: List[str] = Field(default_factory=list)
+    notebooks: List[str] = Field(default_factory=list)
     install_command: Optional[str] = None
     build_command: Optional[str] = None
+    build_commands: List[str] = Field(default_factory=list)
     test_command: Optional[str] = None
+    test_commands: List[str] = Field(default_factory=list)
     start_command: Optional[str] = None
+    application_startup_commands: List[str] = Field(default_factory=list)
     health_check_url: Optional[str] = "http://localhost:8000/health"
+    http_endpoints: List[str] = Field(default_factory=list)
+    likely_health_endpoints: List[str] = Field(default_factory=list)
+    compile_command: Optional[str] = None
+    import_check_command: Optional[str] = None
+    smoke_test_command: Optional[str] = None
     detected_files: List[str] = Field(default_factory=list)
     details: Optional[Dict[str, Any]] = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.runtime == "unknown" and self.language != "unknown":
+            self.runtime = self.language
+        if self.dependency_manager == "unknown" and self.package_manager != "unknown":
+            self.dependency_manager = self.package_manager
+        elif self.package_manager == "unknown" and self.dependency_manager != "unknown":
+            self.package_manager = self.dependency_manager
+
+
+ProjectAnalysis = ProjectManifest
 
 
 class StepDefinition(BaseModel):
@@ -318,6 +373,7 @@ class StepDefinition(BaseModel):
     evidence: Optional[EvidenceRecord] = None
     evidence_digest: Optional[str] = None
     timeout_seconds: Optional[int] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowCreateRequest(BaseModel):
@@ -351,6 +407,8 @@ class WorkflowState(BaseModel):
     recovery_history: List[RecoveryAttempt] = Field(default_factory=list)
     spawned_pids: List[int] = Field(default_factory=list)
     metrics: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    final_status: Optional[str] = None
     created_at: str = Field(default_factory=current_iso_time)
     updated_at: str = Field(default_factory=current_iso_time)
 

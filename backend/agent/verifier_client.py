@@ -155,11 +155,21 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 step_type = StepType.CLONE_REPOSITORY.value
             elif "analyze" in step_name:
                 step_type = StepType.ANALYZE_PROJECT.value
+            elif "compile" in step_name or "compileall" in command:
+                step_type = StepType.COMPILE_PROJECT.value
+            elif "import" in step_name or "import_check" in command:
+                step_type = StepType.IMPORT_CHECK.value
+            elif "notebook" in step_name or "notebook" in command or command.endswith(".ipynb"):
+                step_type = StepType.EXECUTE_NOTEBOOK.value
+            elif "verify_output" in step_name or "outputs" in step_name:
+                step_type = StepType.VERIFY_OUTPUTS.value
+            elif "smoke" in step_name:
+                step_type = StepType.SMOKE_TEST.value
             elif "test" in step_name or "pytest" in command or "jest" in command or "npm test" in command:
                 step_type = StepType.RUN_TESTS.value
             elif "install" in step_name or "pip" in command or "npm install" in command:
                 step_type = StepType.INSTALL_DEPENDENCIES.value
-            elif "build" in step_name or "compile" in step_name or "tsc" in command or "next build" in command:
+            elif "build" in step_name or "tsc" in command or "next build" in command:
                 step_type = StepType.BUILD_PROJECT.value
             elif "start" in step_name or "run" in step_name:
                 step_type = StepType.START_APPLICATION.value
@@ -327,8 +337,67 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_required=False,
                     retry_allowed=False,
                     failure_type="REPOSITORY_ERROR",
-                
-            reason_code=ReasonCode.CLONE_FAILED,)
+                    reason_code=ReasonCode.CLONE_FAILED,
+                )
+            elif step_type == StepType.COMPILE_PROJECT.value:
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason=f"Compilation failed with exit code {execution_result.exit_code}: {stderr[:150].strip() or stdout[:150].strip()}",
+                    recovery_required=True,
+                    recovery_action=None,
+                    retry_allowed=True,
+                    failure_type="BUILD_ERROR",
+                    reason_code=ReasonCode.BUILD_ERROR_DETECTED,
+                )
+            elif step_type == StepType.IMPORT_CHECK.value:
+                missing_mod = re.search(r"No module named ['\"]?([a-zA-Z0-9_\-]+)['\"]?", combined_logs)
+                rec_action = f"pip install {missing_mod.group(1)}" if missing_mod else None
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason=f"Import check failed with exit code {execution_result.exit_code}: {stderr[:150].strip() or stdout[:150].strip()}",
+                    recovery_required=bool(rec_action),
+                    recovery_action=rec_action,
+                    retry_allowed=True,
+                    failure_type="DEPENDENCY_ERROR" if missing_mod else "BUILD_ERROR",
+                    reason_code=ReasonCode.DEPENDENCY_ERROR if missing_mod else ReasonCode.BUILD_ERROR_DETECTED,
+                )
+            elif step_type == StepType.EXECUTE_NOTEBOOK.value:
+                missing_mod = re.search(r"No module named ['\"]?([a-zA-Z0-9_\-]+)['\"]?", combined_logs)
+                rec_action = f"pip install {missing_mod.group(1)}" if missing_mod else None
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason=f"Notebook execution failed with exit code {execution_result.exit_code}: {stderr[:150].strip() or stdout[:150].strip()}",
+                    recovery_required=bool(rec_action),
+                    recovery_action=rec_action,
+                    retry_allowed=True,
+                    failure_type="DEPENDENCY_ERROR" if missing_mod else "RUNTIME_ERROR",
+                    reason_code=ReasonCode.DEPENDENCY_ERROR if missing_mod else ReasonCode.BUILD_ERROR_DETECTED,
+                )
+            elif step_type == StepType.VERIFY_OUTPUTS.value:
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason=f"Notebook output verification failed: {stderr[:150].strip() or stdout[:150].strip()}",
+                    recovery_required=False,
+                    recovery_action=None,
+                    retry_allowed=False,
+                    failure_type="TEST_FAILURE",
+                    reason_code=ReasonCode.ZERO_TESTS_COLLECTED,
+                )
+            elif step_type == StepType.SMOKE_TEST.value:
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason=f"Smoke test failed with exit code {execution_result.exit_code}: {stderr[:150].strip() or stdout[:150].strip()}",
+                    recovery_required=True,
+                    recovery_action=None,
+                    retry_allowed=True,
+                    failure_type="NETWORK_ERROR" if "http" in command else "TEST_FAILURE",
+                    reason_code=ReasonCode.HEALTH_CHECK_FAILED if "http" in command else ReasonCode.EXIT_NONZERO,
+                )
 
             return VerificationResult(
                 verified=False,
@@ -639,18 +708,143 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 reason=f"Step '{execution_result.step}' passed machine-checked evidence verification",
                 recovery_required=False,
                 retry_allowed=True,
-            
-            reason_code=ReasonCode.EXIT_ZERO_CLEAN,)
+                reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+            )
 
-        # 8. Unknown / Unverified Step Type: Tri-state UNVERIFIABLE
+        # 8. COMPILE_PROJECT
+        if step_type == StepType.COMPILE_PROJECT.value:
+            fatal_compile_errors = [
+                "syntaxerror:",
+                "indentationerror:",
+                "taberror:",
+                "compilation failed",
+                "failed to compile",
+                "fatal error:",
+                "error:",
+            ]
+            for err in fatal_compile_errors:
+                if err in combined_lower:
+                    return VerificationResult(
+                        verified=False,
+                        status="FAILED",
+                        reason=f"Compilation failed with syntax/compile error: {err}",
+                        recovery_required=False,
+                        retry_allowed=False,
+                        failure_type="BUILD_ERROR",
+                        reason_code=ReasonCode.BUILD_ERROR_DETECTED,
+                    )
+            return VerificationResult(
+                verified=True,
+                status="VERIFIED",
+                reason="Project compilation verified: source files compiled successfully with exit code 0",
+                recovery_required=False,
+                reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+            )
+
+        # 9. IMPORT_CHECK
+        if step_type == StepType.IMPORT_CHECK.value:
+            if any(e in combined_lower for e in ["modulenotfounderror:", "importerror:", "traceback (most recent call last):"]):
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason="Import check failed: import error detected in output",
+                    recovery_required=True,
+                    recovery_action=None,
+                    retry_allowed=True,
+                    failure_type="DEPENDENCY_ERROR",
+                    reason_code=ReasonCode.DEPENDENCY_ERROR,
+                )
+            return VerificationResult(
+                verified=True,
+                status="VERIFIED",
+                reason="Import check verified: project entrypoints and modules imported cleanly",
+                recovery_required=False,
+                reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+            )
+
+        # 10. EXECUTE_NOTEBOOK
+        if step_type == StepType.EXECUTE_NOTEBOOK.value:
+            if "traceback (most recent call last):" in combined_lower or metadata.get("failed_cell"):
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason=f"Notebook cell execution failed: {stderr[:150].strip() or stdout[:150].strip()}",
+                    recovery_required=False,
+                    recovery_action=None,
+                    retry_allowed=False,
+                    failure_type="RUNTIME_ERROR",
+                    reason_code=ReasonCode.BUILD_ERROR_DETECTED,
+                )
+            cells_exec = metadata.get("cells_executed", 0)
+            return VerificationResult(
+                verified=True,
+                status="VERIFIED",
+                reason=f"Notebook execution verified: {cells_exec} cells executed cleanly without unhandled exceptions",
+                recovery_required=False,
+                reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+            )
+
+        # 11. VERIFY_OUTPUTS
+        if step_type == StepType.VERIFY_OUTPUTS.value:
+            if "zero notebook cell outputs found" in combined_lower or metadata.get("cells_with_output") == 0:
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason="Notebook output verification failed: zero positive cell outputs captured",
+                    recovery_required=False,
+                    retry_allowed=False,
+                    failure_type="TEST_FAILURE",
+                    reason_code=ReasonCode.ZERO_TESTS_COLLECTED,
+                )
+            return VerificationResult(
+                verified=True,
+                status="VERIFIED",
+                reason="Notebook output verification passed: positive execution evidence confirmed across cells",
+                recovery_required=False,
+                reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+            )
+
+        # 12. SMOKE_TEST
+        if step_type == StepType.SMOKE_TEST.value:
+            status_code = metadata.get("status_code")
+            if status_code is not None:
+                if status_code < 200 or status_code >= 300:
+                    return VerificationResult(
+                        verified=False,
+                        status="FAILED",
+                        reason=f"Smoke test failed with HTTP status {status_code}",
+                        recovery_required=False,
+                        retry_allowed=False,
+                        failure_type="NETWORK_ERROR",
+                        reason_code=ReasonCode.HEALTH_CHECK_FAILED,
+                    )
+            elif "fail" in combined_lower or "error" in combined_lower:
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason=f"Smoke test reported failure: {stderr[:150].strip() or stdout[:150].strip()}",
+                    recovery_required=False,
+                    retry_allowed=False,
+                    failure_type="TEST_FAILURE",
+                    reason_code=ReasonCode.EXIT_NONZERO,
+                )
+            return VerificationResult(
+                verified=True,
+                status="VERIFIED",
+                reason="Smoke test verified: endpoint/functional probe responded successfully",
+                recovery_required=False,
+                reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+            )
+
+        # 13. Unknown / Unverified Step Type: Tri-state UNVERIFIABLE
         return VerificationResult(
             verified=False,
             status="UNVERIFIABLE",
             reason=f"Step '{execution_result.step}' has step_type '{step_type}': no machine-evidence verification rules defined.",
             recovery_required=False,
             retry_allowed=True,
-        
-            reason_code=ReasonCode.STEP_UNVERIFIABLE,)
+            reason_code=ReasonCode.STEP_UNVERIFIABLE,
+        )
 
 
 class MockVerifierClient(DeterministicEvidenceVerifier):

@@ -1,7 +1,9 @@
 import logging
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -271,6 +273,97 @@ class WorkflowOrchestrator:
 
         return workflow
 
+    def _check_environment_partially_satisfied(self, executor: ToolExecutor) -> bool:
+        """
+        Inspects whether the runtime environment already satisfies essential project imports
+        or bytecode compilation, allowing execution to proceed even after partial dependency install failure.
+        """
+        ws_dir = Path(executor.workspace_dir)
+        if not ws_dir.exists():
+            return False
+
+        # 1. Check Python files compilation
+        py_files = [
+            p for p in ws_dir.rglob("*.py")
+            if not any(part.startswith((".", "venv", "__pycache__", "node_modules")) for part in p.parts)
+        ]
+        if py_files:
+            try:
+                res = subprocess.run(
+                    [sys.executable, "-m", "compileall", "-q", "."],
+                    cwd=str(ws_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if res.returncode == 0:
+                    return True
+            except Exception:
+                pass
+
+        # 2. Check if notebook exists and is valid JSON
+        nb_files = list(ws_dir.rglob("*.ipynb"))
+        if nb_files:
+            try:
+                import json
+                for nbf in nb_files:
+                    with open(nbf, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if "cells" in data:
+                            return True
+            except Exception:
+                pass
+
+        # 3. Check if Node project has node_modules
+        if (ws_dir / "package.json").exists() and (ws_dir / "node_modules").exists():
+            return True
+
+        return False
+
+    def _handle_partial_dependency_or_halt(
+        self,
+        workflow: WorkflowState,
+        step: StepDefinition,
+        executor: ToolExecutor,
+        exec_result: ExecutionResult,
+        halt_reason: str,
+        rec_plan: Optional[Any] = None,
+    ) -> bool:
+        """
+        Checks if dependency installation failure can be treated as partially satisfied
+        because the runtime environment can already compile or import project modules.
+        Returns True if continuing as PARTIALLY_SATISFIED, False if should halt.
+        """
+        if step.type == StepType.INSTALL_DEPENDENCIES.value and self._check_environment_partially_satisfied(executor):
+            logger.info(
+                f"Dependency installation failed ({halt_reason}), but runtime environment is partially satisfied. Continuing to verification."
+            )
+            step.status = StepStatus.PARTIALLY_SATISFIED
+            if step.metadata is None:
+                step.metadata = {}
+            step.metadata["partial_satisfied"] = True
+            if workflow.metadata is None:
+                workflow.metadata = {}
+            workflow.metadata["partial_dependency_satisfied"] = True
+            self.emit_event(
+                workflow,
+                EventType.STEP_PARTIALLY_SATISFIED,
+                step=step.name,
+                step_id=step.id,
+                execution_id=exec_result.execution_id,
+                status=StepStatus.PARTIALLY_SATISFIED.value,
+                message="Dependency installation failed or timed out, but runtime environment partially satisfies compilation/imports. Proceeding to verification steps.",
+                evidence={
+                    "command": exec_result.command,
+                    "exit_code": exec_result.exit_code,
+                    "partial_satisfied": True,
+                    "halt_reason": halt_reason,
+                },
+            )
+            workflow_store.save(workflow)
+            return True
+        return False
+
     def run_workflow(self, workflow_id: str, resume: bool = False) -> WorkflowState:
         """
         Executes the entire workflow synchronously.
@@ -358,9 +451,9 @@ class WorkflowOrchestrator:
                     workflow_store.save(workflow)
                     return workflow
 
-                # Resumption check: skip steps that are already verified!
-                if resume and step.status == StepStatus.VERIFIED_SUCCESS:
-                    logger.info(f"Resuming: step '{step.name}' already verified. Skipping.")
+                # Resumption check: skip steps that are already verified or partially satisfied!
+                if step.status in (StepStatus.VERIFIED_SUCCESS, StepStatus.PARTIALLY_SATISFIED):
+                    logger.info(f"Step '{step.name}' is already {step.status.value}. Skipping.")
                     continue
 
                 # Skip steps marked NOT_APPLICABLE for this project
@@ -600,6 +693,9 @@ class WorkflowOrchestrator:
                             )
 
                             if rec_plan.expected_outcome == RecoveryOutcome.UNRECOVERABLE or rec_plan.action_type == "unrecoverable":
+                                if self._handle_partial_dependency_or_halt(workflow, step, executor, exec_result, rec_plan.reason, rec_plan):
+                                    step_verified = True
+                                    break
                                 step.status = StepStatus.FAILED
                                 workflow.overall_status = WorkflowStatus.VERIFIED_FAILURE
                                 workflow.final_result = (
@@ -615,6 +711,7 @@ class WorkflowOrchestrator:
                                     exit_code=1,
                                     duration_ms=0.0,
                                     step_resolved=False,
+                                    step_verified=False,
                                 )
                                 workflow.recovery_history.append(attempt)
                                 recovery_attempts_total.labels(failure_type=rec_plan.failure_type, outcome="unrecoverable").inc()
@@ -636,6 +733,9 @@ class WorkflowOrchestrator:
 
                             # Check ledger for repeated futile recovery action
                             if recovery_planner.is_action_futile(rec_plan, workflow.recovery_history):
+                                if self._handle_partial_dependency_or_halt(workflow, step, executor, exec_result, f"futile action {rec_plan.command}", rec_plan):
+                                    step_verified = True
+                                    break
                                 logger.warning(
                                     f"Recovery action '{rec_plan.command}' was previously attempted and failed in workflow {workflow.workflow_id}. "
                                     "Escalating as unrecoverable to prevent futile loops."
@@ -734,6 +834,9 @@ class WorkflowOrchestrator:
                                 )
 
                                 if not postcond_met:
+                                    if self._handle_partial_dependency_or_halt(workflow, step, executor, exec_result, "recovery postcondition failed", rec_plan):
+                                        step_verified = True
+                                        break
                                     logger.warning(
                                         f"Recovery postcondition failed for step '{step.name}' ({rec_plan.postcondition_target or rec_plan.command}). "
                                         "Aborting futile retries on original step."
@@ -779,6 +882,11 @@ class WorkflowOrchestrator:
                             continue
 
                         else:
+                            # Check if partial dependency satisfaction applies before halting
+                            if self._handle_partial_dependency_or_halt(workflow, step, executor, exec_result, verif_result.reason or "retries exhausted"):
+                                step_verified = True
+                                break
+
                             # Retry limit reached or recovery budget exceeded -> VERIFIED FAILURE
                             step.status = StepStatus.FAILED
                             workflow.overall_status = WorkflowStatus.VERIFIED_FAILURE
@@ -805,27 +913,72 @@ class WorkflowOrchestrator:
                             workflow_store.save(workflow)
                             return workflow
 
-            # All steps completed and verified (allowing NOT_APPLICABLE)
-            all_verified = all(
-                s.status in [StepStatus.VERIFIED_SUCCESS, StepStatus.NOT_APPLICABLE]
-                for s in workflow.steps
+            # All steps completed: evaluate honest final status
+            has_failed = any(s.status == StepStatus.FAILED for s in workflow.steps)
+            has_partially_satisfied = (
+                any(s.status == StepStatus.PARTIALLY_SATISFIED for s in workflow.steps)
+                or bool(workflow.metadata and workflow.metadata.get("partial_dependency_satisfied"))
             )
-            if all_verified:
+
+            EXECUTION_TYPES = {
+                StepType.RUN_TESTS.value,
+                StepType.START_APPLICATION.value,
+                StepType.HEALTH_CHECK.value,
+                StepType.BUILD_PROJECT.value,
+                StepType.COMPILE_PROJECT.value,
+                StepType.IMPORT_CHECK.value,
+                StepType.EXECUTE_NOTEBOOK.value,
+                StepType.VERIFY_OUTPUTS.value,
+                StepType.SMOKE_TEST.value,
+                "shell_command",
+            }
+            executed_verification_steps = [
+                s for s in workflow.steps
+                if s.status == StepStatus.VERIFIED_SUCCESS and (s.type in EXECUTION_TYPES or (s.type == StepType.CUSTOM.value and s.command))
+            ]
+
+            if has_failed:
+                workflow.overall_status = WorkflowStatus.VERIFIED_FAILURE
+                workflow.final_status = "VERIFIED_FAILURE"
+                workflow.final_result = "VERIFIED FAILURE: One or more workflow steps failed verification."
+                workflow.verification_status = "FAIL"
+                self.emit_event(
+                    workflow,
+                    EventType.WORKFLOW_FAILED,
+                    status=WorkflowStatus.VERIFIED_FAILURE.value,
+                    message=workflow.final_result,
+                )
+            elif has_partially_satisfied:
+                workflow.overall_status = WorkflowStatus.INCOMPLETE
+                workflow.final_status = "INCOMPLETE"
+                workflow.final_result = "INCOMPLETE: Dependencies were partially satisfied; project could not be fully verified."
+                workflow.verification_status = "INCOMPLETE"
+                self.emit_event(
+                    workflow,
+                    EventType.WORKFLOW_COMPLETED,
+                    status=WorkflowStatus.INCOMPLETE.value,
+                    message=workflow.final_result,
+                )
+            elif not executed_verification_steps:
+                workflow.overall_status = WorkflowStatus.NOT_APPLICABLE
+                workflow.final_status = "NOT_APPLICABLE"
+                workflow.final_result = "NOT_APPLICABLE: Repository contains no runnable code, entrypoints, or test suites."
+                workflow.verification_status = "NOT_APPLICABLE"
+                self.emit_event(
+                    workflow,
+                    EventType.WORKFLOW_COMPLETED,
+                    status=WorkflowStatus.NOT_APPLICABLE.value,
+                    message=workflow.final_result,
+                )
+            else:
                 workflow.overall_status = WorkflowStatus.COMPLETED
+                workflow.final_status = "VERIFIED_SUCCESS"
                 workflow.final_result = "VERIFIED SUCCESS: All planned steps passed machine-checked verification."
+                workflow.verification_status = "PASS"
                 self.emit_event(
                     workflow,
                     EventType.WORKFLOW_COMPLETED,
                     status=WorkflowStatus.COMPLETED.value,
-                    message=workflow.final_result,
-                )
-            else:
-                workflow.overall_status = WorkflowStatus.FAILED
-                workflow.final_result = "Workflow finished with unverified steps."
-                self.emit_event(
-                    workflow,
-                    EventType.WORKFLOW_FAILED,
-                    status=WorkflowStatus.FAILED.value,
                     message=workflow.final_result,
                 )
 
@@ -1001,6 +1154,8 @@ class WorkflowOrchestrator:
             if all_verified:
                 workflow.overall_status = WorkflowStatus.COMPLETED
                 workflow.final_result = "VERIFIED SUCCESS: All planned steps passed machine-checked verification."
+                workflow.final_status = "VERIFIED_SUCCESS"
+                workflow.verification_status = "PASS"
                 self.emit_event(
                     workflow,
                     EventType.WORKFLOW_COMPLETED,

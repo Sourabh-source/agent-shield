@@ -6,6 +6,7 @@ from pydantic import BaseModel, ValidationError
 from backend.config import settings
 from backend.models.workflow import (
     ProjectAnalysis,
+    ProjectManifest,
     StepDefinition,
     StepStatus,
     StepType,
@@ -20,6 +21,24 @@ class PlanOutput(BaseModel):
     steps: List[StepDefinition]
 
 
+STEP_BUDGETS = {
+    "clone_repository": 60,
+    "analyze_project": 30,
+    "install_dependencies_normal": 300,
+    "install_dependencies_heavy_ml": 600,
+    "build_project": 300,
+    "compile_project": 120,
+    "import_check": 60,
+    "execute_notebook": 300,
+    "verify_outputs": 60,
+    "run_tests": 300,
+    "start_application": 120,
+    "health_check": 30,
+    "smoke_test": 60,
+    "final_report": 30,
+}
+
+
 DEFAULT_MVP_STEPS = [
     {
         "id": "step_1",
@@ -28,6 +47,7 @@ DEFAULT_MVP_STEPS = [
         "tool": "git",
         "reason": "Target repository must be cloned to isolated local workspace before inspection",
         "description": "Clone the target repository to local workspace",
+        "timeout_seconds": 60,
     },
     {
         "id": "step_2",
@@ -36,6 +56,7 @@ DEFAULT_MVP_STEPS = [
         "tool": "file",
         "reason": "Inspect workspace files to identify language, dependency manifests, and entry points",
         "description": "Detect languages, package managers, and configurations",
+        "timeout_seconds": 30,
     },
     {
         "id": "step_3",
@@ -44,6 +65,7 @@ DEFAULT_MVP_STEPS = [
         "tool": "pip",
         "reason": "Install declared dependencies required for compiling and running the project",
         "description": "Install all required dependencies",
+        "timeout_seconds": 300,
     },
     {
         "id": "step_4",
@@ -52,6 +74,7 @@ DEFAULT_MVP_STEPS = [
         "tool": "shell",
         "reason": "Compile source code and produce verified build artifacts",
         "description": "Compile or build the application",
+        "timeout_seconds": 300,
     },
     {
         "id": "step_5",
@@ -60,6 +83,7 @@ DEFAULT_MVP_STEPS = [
         "tool": "python",
         "reason": "Execute automated test suite to verify code correctness",
         "description": "Run the project test suite",
+        "timeout_seconds": 300,
     },
     {
         "id": "step_6",
@@ -68,6 +92,7 @@ DEFAULT_MVP_STEPS = [
         "tool": "shell",
         "reason": "Launch application process in background to prepare for health check",
         "description": "Start the service in background for health check",
+        "timeout_seconds": 120,
     },
     {
         "id": "step_7",
@@ -76,6 +101,7 @@ DEFAULT_MVP_STEPS = [
         "tool": "http",
         "reason": "Probe live HTTP endpoint to machine-verify service readiness",
         "description": "Verify application endpoint reachability",
+        "timeout_seconds": 30,
     },
     {
         "id": "step_8",
@@ -84,6 +110,7 @@ DEFAULT_MVP_STEPS = [
         "tool": "shell",
         "reason": "Synthesize verified evidence into final machine-checked audit report",
         "description": "Synthesize verified evidence into final status",
+        "timeout_seconds": 30,
     },
 ]
 
@@ -133,6 +160,7 @@ def create_deterministic_plan(
             tool=item.get("tool"),
             reason=item.get("reason"),
             description=item["description"],
+            timeout_seconds=item.get("timeout_seconds"),
             status=StepStatus.PENDING,
         )
         steps.append(step)
@@ -143,19 +171,283 @@ def create_deterministic_plan(
     return steps
 
 
+def build_adaptive_plan(
+    manifest: ProjectManifest,
+    repo_url: str = "",
+    task: str = "",
+) -> List[StepDefinition]:
+    """
+    Generates an adaptive verification pipeline tailored to the detected project archetype:
+    - FastAPI / Flask APIs: Clone -> Analyze -> Dependencies -> Compile -> Import Check -> Start App -> Health Check -> Smoke Test -> Final Report
+    - Jupyter Notebooks: Clone -> Analyze -> Dependencies -> Execute Notebook -> Verify Outputs -> Final Report
+    - Node / Vite / Next.js: Clone -> Analyze -> Dependencies -> Build -> Tests -> Start App (if applicable) -> Health Check -> Final Report
+    - Python Libraries / CLI / ML: Clone -> Analyze -> Dependencies -> Compile -> Import Check -> Tests (if present) -> Smoke Test (if CLI) -> Final Report
+    """
+    steps: List[StepDefinition] = []
+    dep_timeout = 600 if (manifest.heavy_dependencies or manifest.is_ml) else 300
+
+    # 1. Clone
+    steps.append(StepDefinition(
+        id="step_1",
+        type=StepType.CLONE_REPOSITORY.value,
+        name="Clone repository",
+        tool="git",
+        reason="Target repository must be cloned to isolated local workspace before inspection",
+        description="Clone the target repository to local workspace",
+        timeout_seconds=60,
+        status=StepStatus.PENDING,
+    ))
+
+    # 2. Analyze
+    steps.append(StepDefinition(
+        id="step_2",
+        type=StepType.ANALYZE_PROJECT.value,
+        name="Analyze project",
+        tool="file",
+        reason="Inspect workspace files to identify language, dependency manifests, and entry points",
+        description="Detect languages, package managers, and configurations",
+        timeout_seconds=30,
+        status=StepStatus.PENDING,
+    ))
+
+    # 3. Dependencies
+    dep_tool = "pip"
+    if manifest.package_manager in ["npm", "yarn", "pnpm"] or manifest.language in ["javascript", "typescript"]:
+        dep_tool = "npm"
+    steps.append(StepDefinition(
+        id="step_3",
+        type=StepType.INSTALL_DEPENDENCIES.value,
+        name="Install dependencies",
+        tool=dep_tool,
+        command=manifest.install_command or ("npm install" if dep_tool == "npm" else "pip install -r requirements.txt"),
+        reason=f"Install declared dependencies using {manifest.package_manager} (budget: {dep_timeout}s)",
+        description=f"Install dependencies using {manifest.package_manager}",
+        timeout_seconds=dep_timeout,
+        status=StepStatus.PENDING,
+    ))
+
+    # 4. Archetype-specific pipeline
+    if manifest.is_notebook:
+        nb_file = manifest.notebooks[0] if manifest.notebooks else "notebook.ipynb"
+        steps.append(StepDefinition(
+            id="step_4",
+            type=StepType.EXECUTE_NOTEBOOK.value,
+            name="Execute notebook",
+            tool="notebook",
+            command=nb_file,
+            reason=f"Execute notebook cells sequentially with output capture ({nb_file})",
+            description=f"Execute notebook cells in {nb_file}",
+            timeout_seconds=300,
+            status=StepStatus.PENDING,
+        ))
+        steps.append(StepDefinition(
+            id="step_5",
+            type=StepType.VERIFY_OUTPUTS.value,
+            name="Verify outputs",
+            tool="notebook",
+            command="verify_outputs",
+            reason="Verify positive machine-checked execution outputs from notebook cells",
+            description="Verify notebook execution evidence",
+            timeout_seconds=60,
+            status=StepStatus.PENDING,
+        ))
+
+    elif manifest.is_api:
+        steps.append(StepDefinition(
+            id="step_4",
+            type=StepType.COMPILE_PROJECT.value,
+            name="Compile project",
+            tool="python",
+            command=manifest.compile_command or "python -m compileall .",
+            reason="Verify bytecode compilation and detect syntax errors across project",
+            description="Compile project sources",
+            timeout_seconds=300,
+            status=StepStatus.PENDING,
+        ))
+        steps.append(StepDefinition(
+            id="step_5",
+            type=StepType.IMPORT_CHECK.value,
+            name="Import check",
+            tool="python",
+            command=manifest.import_check_command or "python _import_check.py",
+            reason="Verify key module/entrypoint imports succeed cleanly",
+            description="Import check entrypoints",
+            timeout_seconds=60,
+            status=StepStatus.PENDING,
+        ))
+        start_cmd = manifest.start_command or (manifest.application_startup_commands[0] if manifest.application_startup_commands else None)
+        steps.append(StepDefinition(
+            id="step_6",
+            type=StepType.START_APPLICATION.value,
+            name="Start application",
+            tool="shell",
+            command=start_cmd,
+            reason=f"Launch API server process in background: {start_cmd}",
+            description=f"Start application service ({start_cmd or 'none'})",
+            timeout_seconds=120,
+            status=StepStatus.PENDING,
+        ))
+        hc_url = manifest.health_check_url or (manifest.likely_health_endpoints[0] if manifest.likely_health_endpoints else "http://localhost:8000/health")
+        steps.append(StepDefinition(
+            id="step_7",
+            type=StepType.HEALTH_CHECK.value,
+            name="Health check",
+            tool="http",
+            command=hc_url,
+            reason=f"Probe HTTP readiness on {hc_url}",
+            description=f"Check {hc_url}",
+            timeout_seconds=30,
+            status=StepStatus.PENDING,
+        ))
+        steps.append(StepDefinition(
+            id="step_8",
+            type=StepType.SMOKE_TEST.value,
+            name="Smoke test",
+            tool="http",
+            command=manifest.smoke_test_command or hc_url,
+            reason="Execute functional smoke test against service endpoint",
+            description="Run functional smoke test",
+            timeout_seconds=60,
+            status=StepStatus.PENDING,
+        ))
+
+    elif manifest.runtime == "node" or manifest.language in ["javascript", "typescript"]:
+        steps.append(StepDefinition(
+            id="step_4",
+            type=StepType.BUILD_PROJECT.value,
+            name="Build project",
+            tool="npm",
+            command=manifest.build_command or "npm run build",
+            reason="Compile source code and produce verified build artifacts",
+            description="Build project (node)",
+            timeout_seconds=300,
+            status=StepStatus.PENDING if manifest.build_command else StepStatus.NOT_APPLICABLE,
+        ))
+        steps.append(StepDefinition(
+            id="step_5",
+            type=StepType.RUN_TESTS.value,
+            name="Run tests",
+            tool="npm",
+            command=manifest.test_command or "npm test",
+            reason="Execute automated test suite to verify code correctness",
+            description="Run test suite",
+            timeout_seconds=300,
+            status=StepStatus.PENDING if manifest.test_command else StepStatus.NOT_APPLICABLE,
+        ))
+        if manifest.start_command:
+            steps.append(StepDefinition(
+                id=f"step_{len(steps)+1}",
+                type=StepType.START_APPLICATION.value,
+                name="Start application",
+                tool="npm",
+                command=manifest.start_command,
+                reason=f"Launch application: {manifest.start_command}",
+                description="Start application",
+                timeout_seconds=120,
+                status=StepStatus.PENDING,
+            ))
+            steps.append(StepDefinition(
+                id=f"step_{len(steps)+1}",
+                type=StepType.HEALTH_CHECK.value,
+                name="Health check",
+                tool="http",
+                command=manifest.health_check_url or "http://localhost:3000",
+                reason="Probe application readiness",
+                description="Health check",
+                timeout_seconds=30,
+                status=StepStatus.PENDING,
+            ))
+
+    else:
+        # Python Library / CLI / ML
+        steps.append(StepDefinition(
+            id="step_4",
+            type=StepType.COMPILE_PROJECT.value,
+            name="Compile project",
+            tool="python",
+            command=manifest.compile_command or "python -m compileall .",
+            reason="Compile source code and check for syntax errors",
+            description="Compile project sources",
+            timeout_seconds=300,
+            status=StepStatus.PENDING,
+        ))
+        steps.append(StepDefinition(
+            id="step_5",
+            type=StepType.IMPORT_CHECK.value,
+            name="Import check",
+            tool="python",
+            command=manifest.import_check_command or "python _import_check.py",
+            reason="Verify module imports succeed cleanly",
+            description="Import check entrypoints",
+            timeout_seconds=60,
+            status=StepStatus.PENDING,
+        ))
+        if manifest.test_command:
+            steps.append(StepDefinition(
+                id=f"step_{len(steps)+1}",
+                type=StepType.RUN_TESTS.value,
+                name="Run tests",
+                tool="python",
+                command=manifest.test_command,
+                reason="Execute project test suite",
+                description="Run tests",
+                timeout_seconds=300,
+                status=StepStatus.PENDING,
+            ))
+        if manifest.smoke_test_command or manifest.is_cli:
+            steps.append(StepDefinition(
+                id=f"step_{len(steps)+1}",
+                type=StepType.SMOKE_TEST.value,
+                name="Smoke test",
+                tool="shell",
+                command=manifest.smoke_test_command or "python -m ...",
+                reason="Run functional CLI smoke test",
+                description="Smoke test CLI execution",
+                timeout_seconds=60,
+                status=StepStatus.PENDING,
+            ))
+
+    # Final Report
+    steps.append(StepDefinition(
+        id=f"step_{len(steps)+1}",
+        type=StepType.FINAL_REPORT.value,
+        name="Final report",
+        tool="shell",
+        reason="Synthesize verified evidence into final machine-checked audit report",
+        description="Synthesize verified evidence into final status",
+        timeout_seconds=30,
+        status=StepStatus.PENDING,
+    ))
+
+    return steps
+
+
 def update_plan_with_analysis(
     steps: List[StepDefinition],
     analysis: ProjectAnalysis,
 ) -> List[StepDefinition]:
     """
-    Dynamically refines planned steps with concrete tools, commands, and reasons
-    discovered from the repository analysis.
+    Dynamically refines planned steps with concrete tools, commands, reasons,
+    and adaptive step extensions discovered from the repository analysis.
     """
-    is_node = analysis.language in ["javascript", "typescript"]
-    is_python = analysis.language == "python"
+    is_node = analysis.language in ["javascript", "typescript"] or analysis.runtime == "node"
+    is_python = analysis.language == "python" or analysis.runtime == "python"
+    is_notebook = getattr(analysis, "is_notebook", False) or analysis.runtime == "jupyter" or bool(getattr(analysis, "notebooks", None))
+    is_heavy = getattr(analysis, "heavy_dependencies", False) or getattr(analysis, "is_ml", False)
+    is_api = getattr(analysis, "is_api", False) or getattr(analysis, "framework", "") in ["fastapi", "flask"]
+
+    dep_timeout = 600 if is_heavy else 300
 
     for step in steps:
-        if step.type == StepType.INSTALL_DEPENDENCIES.value:
+        if step.type == StepType.CLONE_REPOSITORY.value:
+            step.timeout_seconds = 60
+        elif step.type == StepType.ANALYZE_PROJECT.value:
+            step.timeout_seconds = 30
+        elif step.type == StepType.FINAL_REPORT.value:
+            step.timeout_seconds = 30
+
+        elif step.type == StepType.INSTALL_DEPENDENCIES.value:
+            step.timeout_seconds = dep_timeout
             if is_node:
                 step.tool = "npm"
                 step.command = analysis.install_command or "npm install"
@@ -163,7 +455,7 @@ def update_plan_with_analysis(
             elif is_python:
                 step.tool = "pip"
                 step.command = analysis.install_command or "pip install -r requirements.txt"
-                step.reason = f"Detected Python project with {analysis.package_manager} package manager"
+                step.reason = f"Detected Python project with {analysis.package_manager} package manager (budget: {dep_timeout}s)"
             else:
                 if analysis.install_command:
                     step.tool = "shell"
@@ -171,13 +463,18 @@ def update_plan_with_analysis(
                     step.reason = "Generic project structure; generic install command detected"
                 else:
                     step.tool = "shell"
-                    step.status = StepStatus.NOT_APPLICABLE.value if 'StepStatus' in globals() and hasattr(StepStatus, 'NOT_APPLICABLE') else 'not_applicable'
+                    step.status = StepStatus.NOT_APPLICABLE
                     step.command = None
                     step.reason = "No install step required for this project type"
             step.description = f"Install dependencies using {analysis.package_manager}"
 
         elif step.type == StepType.BUILD_PROJECT.value:
-            if is_node and analysis.build_command:
+            step.timeout_seconds = 300
+            if is_notebook:
+                step.status = StepStatus.NOT_APPLICABLE
+                step.command = None
+                step.reason = "Build step not applicable for notebook project"
+            elif is_node and analysis.build_command:
                 step.tool = "npm"
                 step.command = analysis.build_command
                 step.reason = "package.json contains a build script"
@@ -196,7 +493,12 @@ def update_plan_with_analysis(
             step.description = f"Build project ({analysis.language})"
 
         elif step.type == StepType.RUN_TESTS.value:
-            if is_node and analysis.test_command:
+            step.timeout_seconds = 300
+            if is_notebook:
+                step.status = StepStatus.NOT_APPLICABLE
+                step.command = None
+                step.reason = "Standard unit tests not applicable for notebook project; notebooks execute directly"
+            elif is_node and analysis.test_command:
                 step.tool = "npm"
                 step.command = analysis.test_command
                 step.reason = "package.json contains a test script"
@@ -215,7 +517,12 @@ def update_plan_with_analysis(
             step.description = f"Run tests ({analysis.test_command or 'none'})"
 
         elif step.type == StepType.START_APPLICATION.value:
-            if is_node and analysis.start_command:
+            step.timeout_seconds = 120
+            if is_notebook:
+                step.status = StepStatus.NOT_APPLICABLE
+                step.command = None
+                step.reason = "Application start not applicable for notebook project"
+            elif is_node and analysis.start_command:
                 step.tool = "npm"
                 step.command = analysis.start_command
                 step.reason = f"package.json provides start command: {analysis.start_command}"
@@ -234,17 +541,108 @@ def update_plan_with_analysis(
             step.description = f"Start application ({analysis.start_command or 'none'})"
 
         elif step.type == StepType.HEALTH_CHECK.value:
-            start_step = next((s for s in steps if s.type == StepType.START_APPLICATION.value), None)
-            if start_step and start_step.status == StepStatus.NOT_APPLICABLE:
+            step.timeout_seconds = 30
+            if is_notebook:
                 step.status = StepStatus.NOT_APPLICABLE
                 step.command = None
-                step.reason = "Health check skipped: application start is not applicable"
+                step.reason = "Health check skipped: not applicable for notebook project"
                 step.description = "Health check (not applicable)"
             else:
-                step.tool = "http"
-                step.command = analysis.health_check_url or "http://localhost:8000/health"
-                step.reason = f"Probe HTTP readiness on {step.command}"
-                step.description = f"Check {step.command}"
+                start_step = next((s for s in steps if s.type == StepType.START_APPLICATION.value), None)
+                if start_step and start_step.status == StepStatus.NOT_APPLICABLE:
+                    step.status = StepStatus.NOT_APPLICABLE
+                    step.command = None
+                    step.reason = "Health check skipped: application start is not applicable"
+                    step.description = "Health check (not applicable)"
+                else:
+                    step.tool = "http"
+                    step.command = analysis.health_check_url or (analysis.likely_health_endpoints[0] if analysis.likely_health_endpoints else "http://localhost:8000/health")
+                    step.reason = f"Probe HTTP readiness on {step.command}"
+                    step.description = f"Check {step.command}"
+
+    # Adaptive Step Additions: Add archetype-specific execution steps if not already in steps
+    step_types = {s.type for s in steps}
+    report_idx = next((i for i, s in enumerate(steps) if s.type == StepType.FINAL_REPORT.value), len(steps))
+
+    if is_notebook and StepType.EXECUTE_NOTEBOOK.value not in step_types:
+        nb_file = analysis.notebooks[0] if analysis.notebooks else "notebook.ipynb"
+        exec_nb = StepDefinition(
+            id=f"step_nb_{len(steps)+1}",
+            type=StepType.EXECUTE_NOTEBOOK.value,
+            name="Execute notebook",
+            tool="notebook",
+            command=nb_file,
+            timeout_seconds=300,
+            reason=f"Execute notebook cells sequentially with output capture ({nb_file})",
+            description=f"Execute notebook cells in {nb_file}",
+            status=StepStatus.PENDING,
+        )
+        verify_out = StepDefinition(
+            id=f"step_vo_{len(steps)+2}",
+            type=StepType.VERIFY_OUTPUTS.value,
+            name="Verify outputs",
+            tool="notebook",
+            command="verify_outputs",
+            timeout_seconds=60,
+            reason="Verify positive machine-checked execution outputs from notebook cells",
+            description="Verify notebook execution evidence",
+            status=StepStatus.PENDING,
+        )
+        steps.insert(report_idx, exec_nb)
+        steps.insert(report_idx + 1, verify_out)
+
+    elif (is_api or is_python or is_heavy) and not is_notebook:
+        # Check if compile_project and import_check should be added
+        inst_idx = next((i for i, s in enumerate(steps) if s.type == StepType.INSTALL_DEPENDENCIES.value), None)
+        insert_at = (inst_idx + 1) if inst_idx is not None else report_idx
+
+        new_steps = []
+        if StepType.COMPILE_PROJECT.value not in step_types:
+            comp_cmd = analysis.compile_command or "python -m compileall ."
+            new_steps.append(StepDefinition(
+                id=f"step_comp_{len(steps)+len(new_steps)+1}",
+                type=StepType.COMPILE_PROJECT.value,
+                name="Compile project",
+                tool="python",
+                command=comp_cmd,
+                timeout_seconds=300,
+                reason="Bytecode compile project source to verify syntax correctness",
+                description="Compile Python sources",
+                status=StepStatus.PENDING,
+            ))
+        if StepType.IMPORT_CHECK.value not in step_types and (analysis.entrypoints or is_api):
+            imp_cmd = analysis.import_check_command or "python _import_check.py"
+            new_steps.append(StepDefinition(
+                id=f"step_imp_{len(steps)+len(new_steps)+1}",
+                type=StepType.IMPORT_CHECK.value,
+                name="Import check",
+                tool="python",
+                command=imp_cmd,
+                timeout_seconds=60,
+                reason="Verify entrypoints and core modules import cleanly",
+                description="Import check project modules",
+                status=StepStatus.PENDING,
+            ))
+
+        for idx, ns in enumerate(new_steps):
+            steps.insert(insert_at + idx, ns)
+
+        if is_api and StepType.SMOKE_TEST.value not in step_types:
+            hc_idx = next((i for i, s in enumerate(steps) if s.type == StepType.HEALTH_CHECK.value), None)
+            smoke_ins = (hc_idx + 1) if hc_idx is not None else report_idx
+            smoke_cmd = analysis.smoke_test_command or analysis.health_check_url or (analysis.likely_health_endpoints[0] if analysis.likely_health_endpoints else "http://localhost:8000/health")
+            smoke_step = StepDefinition(
+                id=f"step_smoke_{len(steps)+1}",
+                type=StepType.SMOKE_TEST.value,
+                name="Smoke test",
+                tool="http",
+                command=smoke_cmd,
+                timeout_seconds=60,
+                reason="Probe live application endpoints with functional HTTP request",
+                description="Run functional smoke test",
+                status=StepStatus.PENDING,
+            )
+            steps.insert(smoke_ins, smoke_step)
 
     return steps
 
