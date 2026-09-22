@@ -98,7 +98,7 @@ def classify_failure(exec_result: ExecutionResult) -> FailureClassification:
         )
 
     # 4. Network / Health check errors
-    net_match = re.search(r"(connection refused|ConnectError|ETIMEDOUT|ENOTFOUND|Could not resolve host|HTTP [45]\d{2}|status code [45]\d{2})", combined, re.IGNORECASE)
+    net_match = re.search(r"(connection refused|ConnectError|\bETIMEDOUT\b|\bENOTFOUND\b|Could not resolve host|HTTP [45]\d{2}|status code [45]\d{2})", combined, re.IGNORECASE)
     if net_match:
         f_type = FailureType.HEALTH_CHECK_FAILURE if (exec_result.step and "health" in exec_result.step.lower()) else FailureType.NETWORK_ERROR
         return FailureClassification(
@@ -118,37 +118,7 @@ def classify_failure(exec_result: ExecutionResult) -> FailureClassification:
             source_evidence=repo_match.group(0),
         )
 
-    # 6. Test failures
-    test_match = re.search(r"(FAILED \(failures=|failed, \d+ passed|AssertionError|test failed)", combined, re.IGNORECASE)
-    if test_match:
-        return FailureClassification(
-            failure_type=FailureType.TEST_FAILURE,
-            reason="Automated test suite assertion failure",
-            confidence=0.94,
-            source_evidence=test_match.group(0),
-        )
-
-    # 7. Permission errors
-    perm_match = re.search(r"(Permission denied|PermissionError|EACCES|Access is denied)", combined, re.IGNORECASE)
-    if perm_match:
-        return FailureClassification(
-            failure_type=FailureType.PERMISSION_ERROR,
-            reason="Filesystem or process permission denied",
-            confidence=0.93,
-            source_evidence=perm_match.group(0),
-        )
-
-    # 8. Tool / command missing
-    tool_match = re.search(r"(is not recognized as an internal or external command|command not found)", combined, re.IGNORECASE)
-    if tool_match:
-        return FailureClassification(
-            failure_type=FailureType.TOOL_ERROR,
-            reason="Required executable or CLI tool is not installed or in PATH",
-            confidence=0.96,
-            source_evidence=tool_match.group(0),
-        )
-
-    # 9. Resource limit errors
+    # 6. Resource limit errors
     res_match = re.search(r"(OutOfMemoryError|JavaScript heap out of memory|MemoryError|No space left on device|disk full)", combined, re.IGNORECASE)
     if res_match:
         return FailureClassification(
@@ -157,6 +127,56 @@ def classify_failure(exec_result: ExecutionResult) -> FailureClassification:
             confidence=0.96,
             details={"resource_type": "memory" if "memory" in res_match.group(1).lower() else "disk"},
             source_evidence=res_match.group(0),
+        )
+
+    # 7. Executable / command not found (WinError 2, FileNotFoundError, command not found)
+    cmd_not_found_patterns = [
+        r"\[WinError 2\]",
+        r"cannot find the file specified",
+        r"executable not found",
+        r"is not recognized as an internal or external command",
+        r"command not found",
+        r"FileNotFoundError",
+    ]
+    if any(re.search(p, combined, re.IGNORECASE) for p in cmd_not_found_patterns) or (exec_result.metadata and exec_result.metadata.get("executable_not_found")):
+        missing_cmd = "command"
+        cmd_str = (exec_result.command or "").lower()
+        if "pytest" in cmd_str or "pytest" in combined.lower():
+            missing_cmd = "pytest"
+        elif "npm" in cmd_str:
+            missing_cmd = "npm"
+        elif "git" in cmd_str:
+            missing_cmd = "git"
+        elif "python" in cmd_str:
+            missing_cmd = "python"
+        return FailureClassification(
+            failure_type=FailureType.COMMAND_NOT_FOUND,
+            reason=f"Executable or command not found: {missing_cmd}",
+            confidence=0.98,
+            details={"command": exec_result.command, "missing_executable": missing_cmd, "ecosystem": "python" if missing_cmd == "pytest" else "unknown"},
+            source_evidence=next((line.strip() for line in stderr.splitlines() if any(re.search(p, line, re.IGNORECASE) for p in cmd_not_found_patterns)), "Executable not found"),
+        )
+
+    # 8. Test failures
+    test_match = re.search(r"(FAILED \(failures=|\bFAILED\s+\S+::|=== FAILURES ===|failed, \d+ passed|AssertionError|assert \d+|test failed)", combined, re.IGNORECASE)
+    is_test_step = "test" in (exec_result.step or "").lower() or "pytest" in (exec_result.command or "").lower()
+    is_notebook = "notebook" in (exec_result.step or "").lower() or "execute_notebook" in str(getattr(exec_result, "step_type", "")).lower()
+    if test_match and is_test_step and not is_notebook:
+        return FailureClassification(
+            failure_type=FailureType.TEST_FAILURE,
+            reason="Automated test suite assertion failure",
+            confidence=0.94,
+            source_evidence=test_match.group(0),
+        )
+
+    # 9. Permission errors
+    perm_match = re.search(r"(Permission denied|PermissionError|EACCES|Access is denied)", combined, re.IGNORECASE)
+    if perm_match:
+        return FailureClassification(
+            failure_type=FailureType.PERMISSION_ERROR,
+            reason="Filesystem or process permission denied",
+            confidence=0.93,
+            source_evidence=perm_match.group(0),
         )
 
     # 10. Build & Syntax errors

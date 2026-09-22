@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from backend.config import settings
 from backend.models.workflow import (
     ExecutionResult,
+    FinalReportData,
     RecoveryAttempt,
     StepDefinition,
     StepStatus,
@@ -148,7 +149,12 @@ class SQLiteCheckpointStorage:
                 state.final_result,
                 1 if state.dry_run else 0,
                 None,
-                json.dumps(state.metrics),
+                json.dumps({
+                    **(state.metrics or {}),
+                    **({"_final_report": state.final_report.model_dump()} if state.final_report else {}),
+                    **({"_metadata": state.metadata} if state.metadata else {}),
+                    **({"_final_status": state.final_status} if state.final_status else {}),
+                }),
                 state.created_at,
                 state.updated_at,
                 state.owner_id or "default-owner",
@@ -286,7 +292,15 @@ class SQLiteCheckpointStorage:
                     timestamp=rr["timestamp"],
                 ))
 
-            metrics = json.loads(row["metrics"]) if row["metrics"] else {}
+            raw_metrics = json.loads(row["metrics"]) if row["metrics"] else {}
+            final_report = None
+            if "_final_report" in raw_metrics:
+                try:
+                    final_report = FinalReportData.model_validate(raw_metrics.pop("_final_report"))
+                except Exception:
+                    pass
+            metadata = raw_metrics.pop("_metadata", {})
+            final_status = raw_metrics.pop("_final_status", None) or row["verification_status"]
 
             owner_id = "default-owner"
             try:
@@ -311,7 +325,10 @@ class SQLiteCheckpointStorage:
                 dry_run=bool(row["dry_run"]),
                 owner_id=owner_id,
                 recovery_history=recovery_history,
-                metrics=metrics,
+                metrics=raw_metrics,
+                metadata=metadata,
+                final_status=final_status,
+                final_report=final_report,
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )

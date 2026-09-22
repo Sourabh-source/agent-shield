@@ -384,12 +384,17 @@ def build_adaptive_plan(
             status=StepStatus.PENDING,
         ))
         if manifest.test_command:
+            cmd = manifest.test_command
+            if cmd == "pytest":
+                cmd = "python -m pytest"
+            elif cmd.startswith("pytest "):
+                cmd = f"python -m pytest {cmd[7:]}"
             steps.append(StepDefinition(
                 id=f"step_{len(steps)+1}",
                 type=StepType.RUN_TESTS.value,
                 name="Run tests",
                 tool="python",
-                command=manifest.test_command,
+                command=cmd,
                 reason="Execute project test suite",
                 description="Run tests",
                 timeout_seconds=300,
@@ -505,8 +510,13 @@ def update_plan_with_analysis(
                 step.reason = "package.json contains a test script"
             elif is_python and analysis.test_command:
                 step.tool = "python"
-                step.command = analysis.test_command
-                step.reason = f"Tests detected in repository; running via {analysis.test_command}"
+                cmd = analysis.test_command
+                if cmd == "pytest":
+                    cmd = "python -m pytest"
+                elif cmd.startswith("pytest "):
+                    cmd = f"python -m pytest {cmd[7:]}"
+                step.command = cmd
+                step.reason = f"Tests detected in repository; running via {cmd}"
             elif analysis.test_command:
                 step.tool = "shell"
                 step.command = analysis.test_command

@@ -225,8 +225,11 @@ export default function WorkflowsHistoryPage() {
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-slate-300">
                 {filtered.map((wf) => {
-                  const completed = (wf.steps || []).filter((s) =>
-                    ["SUCCESS", "VERIFIED_SUCCESS", "NOT_APPLICABLE", "PARTIALLY_SATISFIED"].includes(s.status)
+                  const verified = (wf.steps || []).filter((s) =>
+                    ["SUCCESS", "VERIFIED_SUCCESS"].includes(s.status)
+                  ).length;
+                  const na = (wf.steps || []).filter((s) =>
+                    ["NOT_APPLICABLE", "SKIPPED"].includes(s.status)
                   ).length;
                   const durationStr = getWorkflowDuration(wf);
 
@@ -250,8 +253,13 @@ export default function WorkflowsHistoryPage() {
                         <StatusBadge status={wf.overall_status} size="xs" />
                       </td>
                       <td className="py-3 px-4 whitespace-nowrap text-slate-400">
-                        <span className="text-slate-200 font-semibold">{completed}</span>
+                        <span className="text-slate-200 font-semibold">{verified}</span>
                         <span className="text-slate-600">/{wf.steps ? wf.steps.length : 0}</span>
+                        {na > 0 && (
+                          <span className="text-[10px] text-slate-500 block font-sans">
+                            {na} N/A
+                          </span>
+                        )}
                       </td>
                       <td className="py-3 px-4 whitespace-nowrap text-slate-300">
                         {durationStr}

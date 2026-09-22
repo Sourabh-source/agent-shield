@@ -1,3 +1,4 @@
+import json
 import logging
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from backend.agent.classifier import classify_failure
 from backend.agent.executor import ToolExecutor
 from backend.agent.planner import generate_plan, update_plan_with_analysis
 from backend.agent.recovery_planner import recovery_planner
+from backend.agent.fix_generator import generate_recommended_fixes
 from backend.agent.snapshot import capture_workspace_snapshot, diff_snapshots
 from backend.agent.verifier_client import VerificationClient, get_verifier_client
 from backend.audit.hash_chain import HashChain
@@ -546,6 +548,22 @@ class WorkflowOrchestrator:
 
                     effective_step = step
 
+                    # Generate and persist final report content before final_report step executes
+                    if effective_step.type == StepType.FINAL_REPORT.value:
+                        report_data = self.get_final_report_data(workflow.workflow_id)
+                        if report_data:
+                            report_json = json.dumps(report_data.model_dump(), indent=2)
+                            report_file = Path(executor.workspace_dir) / "final_report.json"
+                            try:
+                                report_file.write_text(report_json, encoding="utf-8")
+                            except Exception as e:
+                                logger.warning(f"Failed to write final_report.json: {e}")
+                            workflow.final_report = report_data
+                            if workflow.metadata is None:
+                                workflow.metadata = {}
+                            workflow.metadata["final_report"] = report_data.model_dump()
+                            workflow_store.save(workflow)
+
                     # Capture workspace snapshot before execution
                     snap_before = capture_workspace_snapshot(executor.workspace_dir)
 
@@ -804,11 +822,16 @@ class WorkflowOrchestrator:
                                 workflow_store.save(workflow)
                                 return workflow
 
-                            # Apply any step-level overrides (such as extended timeout or relocated port)
+                            # Apply any step-level overrides (such as extended timeout or rewritten command)
                             if rec_plan.action_type == "extend_timeout" and rec_plan.timeout_override:
                                 step.timeout_seconds = rec_plan.timeout_override
-                            if rec_plan.action_type == "relocate_port" and rec_plan.rewritten_command:
+                            if rec_plan.rewritten_command:
                                 step.command = rec_plan.rewritten_command
+                            elif step.type == StepType.RUN_TESTS.value:
+                                if step.command == "pytest":
+                                    step.command = "python -m pytest"
+                                elif step.command and step.command.startswith("pytest "):
+                                    step.command = f"python -m pytest {step.command[7:]}"
 
                             # Check if recovery is already satisfied (idempotent check)
                             if recovery_planner.is_action_already_satisfied(rec_plan, executor.workspace_dir, step=step):
@@ -967,10 +990,20 @@ class WorkflowOrchestrator:
                 if s.status == StepStatus.VERIFIED_SUCCESS and (s.type in EXECUTION_TYPES or (s.type == StepType.CUSTOM.value and s.command))
             ]
 
+            # Ensure final report exists and is verified before marking fully successful
+            final_report_data = self.get_final_report_data(workflow.workflow_id)
+            final_report_step = next((s for s in workflow.steps if s.type == StepType.FINAL_REPORT.value), None)
+
+            if final_report_step and final_report_step.status != StepStatus.VERIFIED_SUCCESS:
+                has_failed = True
+
+            if not final_report_data:
+                has_failed = True
+
             if has_failed:
                 workflow.overall_status = WorkflowStatus.VERIFIED_FAILURE
                 workflow.final_status = "VERIFIED_FAILURE"
-                workflow.final_result = "VERIFIED FAILURE: One or more workflow steps failed verification."
+                workflow.final_result = "VERIFIED FAILURE: One or more workflow steps failed verification or final report could not be generated."
                 workflow.verification_status = "FAIL"
                 self.emit_event(
                     workflow,
@@ -989,7 +1022,7 @@ class WorkflowOrchestrator:
                     status=WorkflowStatus.INCOMPLETE.value,
                     message=workflow.final_result,
                 )
-            elif not executed_verification_steps:
+            elif not executed_verification_steps and not final_report_step:
                 workflow.overall_status = WorkflowStatus.NOT_APPLICABLE
                 workflow.final_status = "NOT_APPLICABLE"
                 workflow.final_result = "NOT_APPLICABLE: Repository contains no runnable code, entrypoints, or test suites."
@@ -1012,12 +1045,29 @@ class WorkflowOrchestrator:
                     message=workflow.final_result,
                 )
 
-            # Record final execution metrics
+            workflow.current_step = None
+            if final_report_data:
+                workflow.final_report = final_report_data
+                if workflow.metadata is None:
+                    workflow.metadata = {}
+                workflow.metadata["final_report"] = final_report_data.model_dump()
+
+            # Record final execution metrics with separate step counts
             total_duration = round(time.perf_counter() - workflow_start_time, 2)
+            verified_count = sum(1 for s in workflow.steps if s.status == StepStatus.VERIFIED_SUCCESS)
+            na_count = sum(1 for s in workflow.steps if s.status == StepStatus.NOT_APPLICABLE)
+            failed_count = sum(1 for s in workflow.steps if s.status == StepStatus.FAILED)
+            pending_count = sum(1 for s in workflow.steps if s.status in [StepStatus.PENDING, StepStatus.RUNNING, StepStatus.VERIFYING, StepStatus.RECOVERING])
+
             workflow.metrics = {
                 "total_duration_seconds": total_duration,
+                "total_steps": len(workflow.steps),
                 "steps_total": len(workflow.steps),
-                "steps_verified": sum(1 for s in workflow.steps if s.status == StepStatus.VERIFIED_SUCCESS),
+                "verified_steps": verified_count,
+                "steps_verified": verified_count,
+                "not_applicable_steps": na_count,
+                "failed_steps": failed_count,
+                "pending_steps": pending_count,
                 "retries_count": workflow.retries,
                 "recoveries_count": len(workflow.recovery_history),
             }
@@ -1523,15 +1573,31 @@ class WorkflowOrchestrator:
             if (r.status == RecoveryOutcome.UNRECOVERABLE or str(r.status).upper() == "UNRECOVERABLE")
         )
 
-        return FinalReportData(
+        verified_steps = sum(1 for s in workflow.steps if s.status == StepStatus.VERIFIED_SUCCESS)
+        not_applicable_steps = sum(1 for s in workflow.steps if s.status == StepStatus.NOT_APPLICABLE)
+        failed_steps = sum(1 for s in workflow.steps if s.status == StepStatus.FAILED)
+        pending_steps = sum(1 for s in workflow.steps if s.status in [StepStatus.PENDING, StepStatus.RUNNING, StepStatus.VERIFYING, StepStatus.RECOVERING])
+        steps_completed = verified_steps + not_applicable_steps
+
+        summary = (
+            f"Repository verification audit completed. Verdict: {workflow.overall_status.value}. "
+            f"{verified_steps} steps verified, {not_applicable_steps} not applicable, "
+            f"{failed_steps} failed out of {len(workflow.steps)} total planned steps."
+        )
+
+        recommended_fixes, fixes_summary = generate_recommended_fixes(workflow)
+
+        report = FinalReportData(
             workflow_id=workflow.workflow_id,
             repository=workflow.repository,
             task=workflow.task,
             final_status=workflow.overall_status.value,
-            steps_completed=sum(
-                1 for s in workflow.steps if s.status in [StepStatus.VERIFIED_SUCCESS, StepStatus.NOT_APPLICABLE]
-            ),
+            steps_completed=steps_completed,
             total_steps=len(workflow.steps),
+            verified_steps=verified_steps,
+            not_applicable_steps=not_applicable_steps,
+            failed_steps=failed_steps,
+            pending_steps=pending_steps,
             recoveries=len(workflow.recovery_history),
             recoveries_attempted=recoveries_attempted,
             recoveries_verified_effective=recoveries_verified_effective,
@@ -1542,4 +1608,13 @@ class WorkflowOrchestrator:
             recovery_history=rec_history,
             evidence_records=evidence_records,
             evidence_digests=evidence_digests,
+            summary=summary,
+            recommended_fixes=recommended_fixes,
+            fixes_summary=fixes_summary,
         )
+
+        workflow.final_report = report
+        if workflow.metadata is None:
+            workflow.metadata = {}
+        workflow.metadata["final_report"] = report.model_dump()
+        return report

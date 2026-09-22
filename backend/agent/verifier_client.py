@@ -468,18 +468,67 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 
             reason_code=ReasonCode.BUILD_ERROR_DETECTED,)
 
-            # 7. StepType-based failure classification
-            if step_type == StepType.RUN_TESTS.value:
+            # 6.5 Executable / Command not found (WinError 2, FileNotFoundError, command not found)
+            cmd_not_found_patterns = [
+                r"\[WinError 2\]",
+                r"cannot find the file specified",
+                r"executable not found",
+                r"is not recognized as an internal or external command",
+                r"command not found",
+                r"FileNotFoundError",
+            ]
+            if any(re.search(p, combined_logs, re.IGNORECASE) for p in cmd_not_found_patterns) or metadata.get("executable_not_found"):
+                missing_cmd = "command"
+                cmd_low = (execution_result.command or "").lower()
+                if "pytest" in cmd_low or "pytest" in combined_lower:
+                    missing_cmd = "pytest"
+                elif "npm" in cmd_low:
+                    missing_cmd = "npm"
+                elif "git" in cmd_low:
+                    missing_cmd = "git"
+                elif "python" in cmd_low:
+                    missing_cmd = "python"
+                rec_action = "pip install pytest" if missing_cmd == "pytest" else None
                 return VerificationResult(
                     verified=False,
                     status="FAILED",
-                    reason=f"Test run failed with exit code {execution_result.exit_code}: {stderr[:150].strip() or stdout[:150].strip()}",
-                    recovery_required=True,
-                    recovery_action="pip install pytest",
-                    retry_allowed=True,
-                    failure_type="TEST_FAILURE",
-                
-            reason_code=ReasonCode.EXIT_NONZERO,)
+                    reason=f"Required executable '{missing_cmd}' was not found: {stderr[:150].strip() or stdout[:150].strip()}",
+                    recovery_required=bool(rec_action),
+                    recovery_action=rec_action,
+                    retry_allowed=bool(rec_action),
+                    failure_type="COMMAND_NOT_FOUND",
+                    reason_code=ReasonCode.COMMAND_NOT_FOUND,
+                )
+
+            # 7. StepType-based failure classification
+            if step_type == StepType.RUN_TESTS.value:
+                is_missing_pytest = (
+                    "no module named 'pytest'" in combined_lower
+                    or "no module named pytest" in combined_lower
+                    or any(re.search(p, combined_lower) for p in [r"\[winerror 2\]", r"cannot find the file specified", r"command not found.*pytest", r"pytest.*not recognized"])
+                )
+                if is_missing_pytest:
+                    return VerificationResult(
+                        verified=False,
+                        status="FAILED",
+                        reason=f"Pytest is not installed or not found on PATH: {stderr[:150].strip() or stdout[:150].strip()}",
+                        recovery_required=True,
+                        recovery_action="pip install pytest",
+                        retry_allowed=True,
+                        failure_type="COMMAND_NOT_FOUND",
+                        reason_code=ReasonCode.COMMAND_NOT_FOUND,
+                    )
+                else:
+                    return VerificationResult(
+                        verified=False,
+                        status="FAILED",
+                        reason=f"Test run failed with exit code {execution_result.exit_code}: {stderr[:150].strip() or stdout[:150].strip()}",
+                        recovery_required=False,
+                        recovery_action=None,
+                        retry_allowed=False,
+                        failure_type="TEST_FAILURE",
+                        reason_code=ReasonCode.EXIT_NONZERO,
+                    )
             elif step_type == StepType.INSTALL_DEPENDENCIES.value:
                 return VerificationResult(
                     verified=False,
@@ -630,12 +679,12 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     verified=False,
                     status="FAILED",
                     reason="Test verification failed: zero tests were executed or collected.",
-                    recovery_required=True,
-                    recovery_action="pip install pytest",
-                    retry_allowed=True,
+                    recovery_required=False,
+                    recovery_action=None,
+                    retry_allowed=False,
                     failure_type="TEST_FAILURE",
-                
-            reason_code=ReasonCode.ZERO_TESTS_COLLECTED,)
+                    reason_code=ReasonCode.ZERO_TESTS_COLLECTED,
+                )
 
             # Check 2: Fatal test failure patterns (even if exit code was 0 due to pipe or suppression)
             fatal_test_errors = [
@@ -661,24 +710,24 @@ class DeterministicEvidenceVerifier(VerificationClient):
                         verified=False,
                         status="FAILED",
                         reason=f"Test verification failed: output reports test failures ({pattern}).",
-                        recovery_required=True,
-                        recovery_action="pip install pytest",
-                        retry_allowed=True,
+                        recovery_required=False,
+                        recovery_action=None,
+                        retry_allowed=False,
                         failure_type="TEST_FAILURE",
-                    
-            reason_code=ReasonCode.PIPE_SUPPRESSED_FAILURE,)
+                        reason_code=ReasonCode.PIPE_SUPPRESSED_FAILURE,
+                    )
 
             if not combined_logs.strip():
                 return VerificationResult(
                     verified=False,
                     status="FAILED",
                     reason="Test verification failed: zero test execution evidence captured (empty output)",
-                    recovery_required=True,
-                    recovery_action="pip install pytest",
-                    retry_allowed=True,
+                    recovery_required=False,
+                    recovery_action=None,
+                    retry_allowed=False,
                     failure_type="TEST_FAILURE",
-                
-            reason_code=ReasonCode.EXIT_NONZERO,)
+                    reason_code=ReasonCode.EXIT_NONZERO,
+                )
 
             return VerificationResult(
                 verified=True,
@@ -914,8 +963,32 @@ class DeterministicEvidenceVerifier(VerificationClient):
             
             reason_code=ReasonCode.EXIT_ZERO_CLEAN,)
 
-        # 7. ANALYZE_PROJECT & FINAL_REPORT
-        if step_type in (StepType.ANALYZE_PROJECT.value, StepType.FINAL_REPORT.value):
+        # 7. FINAL_REPORT: verify authoritative report was generated and is non-empty
+        if step_type == StepType.FINAL_REPORT.value:
+            stdout_clean = stdout.strip()
+            report_meta = metadata.get("report_generated")
+            if execution_result.exit_code != 0 or not stdout_clean or report_meta is False:
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason="Final report verification failed: report generation failed or produced empty content",
+                    recovery_required=False,
+                    retry_allowed=False,
+                    failure_type="REPORT_GENERATION_FAILED",
+                    reason_code=ReasonCode.UNKNOWN,
+                )
+            return VerificationResult(
+                verified=True,
+                status="VERIFIED",
+                reason="Final report verified: non-empty authoritative machine-checked audit report successfully generated and persisted",
+                recovery_required=False,
+                retry_allowed=True,
+                reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+                metadata={"final_report_verified": True},
+            )
+
+        # 8. ANALYZE_PROJECT
+        if step_type == StepType.ANALYZE_PROJECT.value:
             return VerificationResult(
                 verified=True,
                 status="VERIFIED",

@@ -451,6 +451,23 @@ def execute_shell_command(
                 metadata={"timed_out": True},
             )
 
+        except FileNotFoundError as exc:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            return ExecutionResult(
+                workflow_id=workflow_id,
+                step=step_name,
+                step_id=step_id,
+                command=redact_secrets(cmd_str),
+                exit_code=127,
+                stdout=truncate_output(redact_secrets("".join(accumulated_stdout))),
+                stderr=f"Executable not found: [WinError 2] {str(exc)}",
+                duration_ms=duration_ms,
+                timestamp=current_iso_time(),
+                workspace=resolved_cwd,
+                timeout_seconds=timeout_seconds,
+                metadata={"executable_not_found": True, "error": str(exc)},
+            )
+
         except Exception as exc:
             duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             return ExecutionResult(

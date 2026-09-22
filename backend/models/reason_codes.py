@@ -19,4 +19,6 @@ class ReasonCode(str, Enum):
     HEALTH_CHECK_PASSED = "health_check_passed"
     PROCESS_EXITED = "process_exited"
     SERVICE_NOT_LISTENING = "service_not_listening"
+    COMMAND_NOT_FOUND = "command_not_found"
+    EXECUTABLE_NOT_FOUND = "executable_not_found"
     UNKNOWN = "unknown"

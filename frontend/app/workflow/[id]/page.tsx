@@ -42,7 +42,9 @@ export default function WorkflowDetailPage() {
   const fetchReport = useCallback(async (workflowId: string) => {
     try {
       const r = await api.getReport(workflowId);
-      setReport(r);
+      if (r && Object.keys(r).length > 0) {
+        setReport(r);
+      }
     } catch {
       // report will be available on completion
     }
@@ -54,9 +56,14 @@ export default function WorkflowDetailPage() {
       const wf = await api.getStatus(id);
       setWorkflow(wf);
       setError(null);
+      if (wf.final_report) {
+        setReport(wf.final_report);
+      }
       if (isTerminal(wf.overall_status)) {
         isTerminalRef.current = true;
-        await fetchReport(id);
+        if (!wf.final_report) {
+          await fetchReport(id);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch workflow state");
@@ -79,6 +86,23 @@ export default function WorkflowDetailPage() {
       if (pollingRef.current) clearTimeout(pollingRef.current);
     };
   }, [id, fetchStatus]);
+
+  useEffect(() => {
+    if (activeTab === "report" && id && !report) {
+      let isMounted = true;
+      api
+        .getReport(id)
+        .then((r) => {
+          if (isMounted && r && Object.keys(r).length > 0) {
+            setReport(r);
+          }
+        })
+        .catch(() => {});
+      return () => {
+        isMounted = false;
+      };
+    }
+  }, [activeTab, id, report]);
 
   const handleCancel = async () => {
     if (!id) return;
@@ -165,13 +189,19 @@ export default function WorkflowDetailPage() {
   const terminal = isTerminal(workflow.overall_status);
   const canCancel = !terminal && !["CANCEL_REQUESTED", "CANCELLED"].includes(workflow.overall_status);
   const canResume = workflow.overall_status === "CANCELLED";
-
-  const completedSteps = workflow.steps.filter((s) =>
-    ["SUCCESS", "VERIFIED_SUCCESS", "NOT_APPLICABLE", "PARTIALLY_SATISFIED"].includes(s.status)
+  const totalSteps = workflow.steps.length;
+  const verifiedSteps = workflow.steps.filter((s) =>
+    ["SUCCESS", "VERIFIED_SUCCESS"].includes(s.status)
   ).length;
+  const notApplicableSteps = workflow.steps.filter((s) =>
+    ["NOT_APPLICABLE", "SKIPPED"].includes(s.status)
+  ).length;
+  const failedSteps = workflow.steps.filter((s) => s.status === "FAILED").length;
+
+  const completedTerminalSteps = verifiedSteps + notApplicableSteps + failedSteps;
   const progressPct =
-    workflow.steps.length > 0
-      ? Math.round((completedSteps / workflow.steps.length) * 100)
+    totalSteps > 0
+      ? Math.round((completedTerminalSteps / totalSteps) * 100)
       : 0;
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
@@ -270,7 +300,9 @@ export default function WorkflowDetailPage() {
           <div className="p-2.5 rounded bg-[#070b14] border border-slate-800">
             <span className="text-[10px] text-slate-500 uppercase tracking-wider block">Steps Status</span>
             <div className="text-sm font-semibold text-slate-200 mt-0.5">
-              {completedSteps} / {workflow.steps.length} verified
+              {notApplicableSteps > 0
+                ? `${verifiedSteps} verified / ${notApplicableSteps} not applicable`
+                : `${verifiedSteps} / ${totalSteps} verified`}
             </div>
           </div>
 
@@ -352,21 +384,31 @@ export default function WorkflowDetailPage() {
 
           {activeTab === "events" && <EventsLog events={workflow.events || []} />}
 
-          {activeTab === "report" && (
-            report ? (
-              <FinalReportPanel report={report} />
-            ) : terminal ? (
-              <div className="py-12 text-center text-xs text-slate-500 font-mono">
-                <RefreshCw className="w-5 h-5 mx-auto mb-2 text-blue-400 animate-spin" />
-                <p>Synthesizing final audit report...</p>
-              </div>
-            ) : (
+          {activeTab === "report" && (() => {
+            const currentReport =
+              report ||
+              workflow.final_report ||
+              (workflow.metadata?.final_report as FinalReportData | undefined) ||
+              null;
+
+            if (currentReport) {
+              return <FinalReportPanel report={currentReport} />;
+            }
+            if (terminal) {
+              return (
+                <div className="py-12 text-center text-xs text-slate-500 font-mono">
+                  <RefreshCw className="w-5 h-5 mx-auto mb-2 text-blue-400 animate-spin" />
+                  <p>Synthesizing final audit report...</p>
+                </div>
+              );
+            }
+            return (
               <div className="py-12 text-center text-xs text-slate-500 font-mono">
                 <Clock className="w-5 h-5 mx-auto mb-2 text-slate-600" />
                 <p>Final report will be compiled automatically upon terminal workflow state.</p>
               </div>
-            )
-          )}
+            );
+          })()}
         </div>
       </div>
     </div>

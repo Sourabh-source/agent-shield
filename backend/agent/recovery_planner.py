@@ -286,6 +286,16 @@ class RecoveryPlanner:
                 post_target = pkg
                 post_cmd = f"pip show {pkg}"
 
+            rewritten_cmd = None
+            original_cmd = (exec_result.command or "").strip()
+            if pkg == "pytest" or "pytest" in original_cmd.lower():
+                if original_cmd == "pytest":
+                    rewritten_cmd = "python -m pytest"
+                elif original_cmd.startswith("pytest "):
+                    rewritten_cmd = f"python -m pytest {original_cmd[7:]}"
+                else:
+                    rewritten_cmd = original_cmd or "python -m pytest"
+
             return RecoveryPlan(
                 reason=classification.reason,
                 failure_type=failure_type,
@@ -294,10 +304,45 @@ class RecoveryPlanner:
                 command=suggested_action or cmd,
                 target_step=target_step,
                 max_attempts=max_attempts,
+                rewritten_command=rewritten_cmd,
                 postcondition_type=post_type,
                 postcondition_target=post_target,
                 postcondition_cmd=post_cmd,
             )
+
+        # 1.5 Command / Executable Not Found (WinError 2, FileNotFoundError, executable missing on PATH)
+        elif classification.failure_type in (FailureType.COMMAND_NOT_FOUND, FailureType.EXECUTABLE_NOT_FOUND):
+            missing = details.get("missing_executable") or details.get("command") or ""
+            original_cmd = (exec_result.command or "").strip()
+            if "pytest" in missing.lower() or "pytest" in original_cmd.lower():
+                rewritten = "python -m pytest"
+                if original_cmd.startswith("pytest "):
+                    rewritten = f"python -m pytest {original_cmd[7:]}"
+                return RecoveryPlan(
+                    reason="Pytest executable not found on PATH. Installing pytest into Python environment and setting test command to 'python -m pytest'.",
+                    failure_type=failure_type,
+                    action_type="install_missing_tool",
+                    tool="pip",
+                    command="pip install pytest",
+                    target_step=target_step,
+                    max_attempts=max_attempts,
+                    rewritten_command=rewritten,
+                    postcondition_type="package_installed",
+                    postcondition_target="pytest",
+                    postcondition_cmd="pip show pytest",
+                    expected_outcome=RecoveryOutcome.SUCCESS,
+                )
+            elif suggested_action:
+                return RecoveryPlan(
+                    reason=classification.reason,
+                    failure_type=failure_type,
+                    action_type="install_missing_tool",
+                    tool="pip" if "pip" in suggested_action else "shell",
+                    command=suggested_action,
+                    target_step=target_step,
+                    max_attempts=max_attempts,
+                    expected_outcome=RecoveryOutcome.SUCCESS,
+                )
 
         # 2. Timeout
         elif classification.failure_type == FailureType.TIMEOUT:

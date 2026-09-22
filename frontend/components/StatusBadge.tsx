@@ -123,6 +123,24 @@ const STATUS_MAP: Record<string, StatusConfig> = {
     badgeClass: "bg-zinc-900 text-zinc-400 border-zinc-700",
     icon: FastForward,
   },
+  NOT_APPLICABLE: {
+    label: "NOT APPLICABLE",
+    dotColor: "bg-slate-400",
+    badgeClass: "bg-slate-900/80 text-slate-300 border-slate-700/80",
+    icon: FastForward,
+  },
+  INCOMPLETE: {
+    label: "INCOMPLETE",
+    dotColor: "bg-amber-400",
+    badgeClass: "bg-amber-950/50 text-amber-300 border-amber-800/60",
+    icon: AlertTriangle,
+  },
+  PARTIALLY_SATISFIED: {
+    label: "PARTIALLY SATISFIED",
+    dotColor: "bg-amber-400",
+    badgeClass: "bg-amber-950/50 text-amber-300 border-amber-800/60",
+    icon: AlertTriangle,
+  },
 };
 
 export default function StatusBadge({

@@ -115,12 +115,38 @@ export interface WorkflowState {
   max_retries: number;
   workspace_path?: string;
   verification_status?: string;
+  final_status?: string;
   final_result?: string;
   dry_run: boolean;
   recovery_history: RecoveryAttempt[];
   metrics: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  final_report?: FinalReportData;
   created_at: string;
   updated_at: string;
+}
+
+export interface RecommendedFix {
+  id: string;
+  title: string;
+  step: string;
+  what_happened: string;
+  diagnosis: string;
+  recommended_fix: string;
+  status: "RECOVERED" | "ACTION REQUIRED" | "UNVERIFIED" | string;
+  severity?: "HIGH" | "MEDIUM" | "LOW" | string;
+  recovery_attempted?: string | null;
+  recovery_result?: string | null;
+  retries?: number;
+  failure_type?: string | null;
+  details?: Record<string, unknown> | null;
+}
+
+export interface RecommendedFixesSummary {
+  issues_found: number;
+  recovered_automatically: number;
+  action_required: number;
+  retries: number;
 }
 
 export interface FinalReportData {
@@ -130,13 +156,23 @@ export interface FinalReportData {
   final_status: string;
   steps_completed: number;
   total_steps: number;
+  verified_steps?: number;
+  not_applicable_steps?: number;
+  failed_steps?: number;
+  pending_steps?: number;
   recoveries: number;
+  recoveries_attempted?: number;
+  recoveries_verified_effective?: number;
+  recoveries_unrecoverable?: number;
   retries: number;
   duration_seconds: number;
   verification_summary: Record<string, string>;
   recovery_history: Record<string, unknown>[];
   evidence_records?: Record<string, unknown>[];
   evidence_digests?: Record<string, string>;
+  summary?: string;
+  recommended_fixes?: RecommendedFix[];
+  fixes_summary?: RecommendedFixesSummary;
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -223,6 +259,8 @@ export const TERMINAL_STATUSES = new Set([
   "VERIFIED_SUCCESS",
   "VERIFIED_FAILURE",
   "VERIFICATION_UNAVAILABLE",
+  "NOT_APPLICABLE",
+  "INCOMPLETE",
   "CANCELLED",
   "BUDGET_EXCEEDED",
   "FAILED",

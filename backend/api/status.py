@@ -34,6 +34,13 @@ def get_workflow_status(workflow_id: str, request: Request) -> WorkflowState:
         )
 
     verify_workflow_ownership(workflow, request, workflow_id)
+
+    if workflow.final_report is None and workflow.metadata and "final_report" in workflow.metadata:
+        try:
+            workflow.final_report = FinalReportData(**workflow.metadata["final_report"])
+        except Exception:
+            pass
+
     return workflow
 
 
@@ -69,12 +76,21 @@ def get_workflow_final_report(workflow_id: str, request: Request) -> FinalReport
 
     verify_workflow_ownership(workflow, request, workflow_id)
 
+    if workflow.final_report:
+        return workflow.final_report
+
+    if workflow.metadata and "final_report" in workflow.metadata:
+        try:
+            return FinalReportData(**workflow.metadata["final_report"])
+        except Exception:
+            pass
+
     orchestrator = WorkflowOrchestrator()
     report = orchestrator.get_final_report_data(workflow_id)
     if not report:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Workflow '{workflow_id}' not found",
+            detail=f"Workflow '{workflow_id}' final report not found or not yet generated",
         )
     return report
 

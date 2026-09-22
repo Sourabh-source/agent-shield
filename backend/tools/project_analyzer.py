@@ -45,7 +45,7 @@ def classify_execution_mode(
         return ExecutionMode.HTTP_SERVICE
 
     # 1. Obvious test/build/compile/notebook/CLI help commands are ALWAYS SHORT_LIVED
-    if any(cmd.startswith(p) for p in ["pytest", "python -m unittest", "ctest", "mvn test", "npm test", "yarn test", "pnpm test"]):
+    if any(cmd.startswith(p) for p in ["pytest", "python -m pytest", "python -m unittest", "ctest", "mvn test", "npm test", "yarn test", "pnpm test"]):
         return ExecutionMode.SHORT_LIVED
     if any(cmd.startswith(p) for p in ["npm run build", "yarn build", "pnpm build", "mvn compile", "make", "cmake", "python -m compileall"]):
         return ExecutionMode.SHORT_LIVED
@@ -469,8 +469,8 @@ def analyze_workspace(workspace_dir: str) -> ProjectManifest:
         tests_exist = any(rf.startswith("tests/") or rf.startswith("test/") for rf in rel_files)
         has_test_files = any(f.startswith("test_") or f.endswith("_test.py") for f in [Path(rf).name for rf in py_files])
         if tests_exist or has_test_files:
-            manifest.test_command = "pytest"
-            manifest.test_commands.append("pytest")
+            manifest.test_command = "python -m pytest"
+            manifest.test_commands.append("python -m pytest")
         elif not manifest.is_notebook and not manifest.is_api:
             manifest.test_command = "python -m unittest discover"
             manifest.test_commands.append("python -m unittest discover")

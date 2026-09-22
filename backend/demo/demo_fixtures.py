@@ -390,12 +390,31 @@ def run_demo_workflow(
     workflow.final_status = "VERIFIED_SUCCESS"
     workflow.verification_status = "VERIFIED_SUCCESS"
     workflow.retries = 0
+
+    verified_count = sum(1 for s in workflow.steps if s.status == StepStatus.VERIFIED_SUCCESS)
+    na_count = sum(1 for s in workflow.steps if s.status == StepStatus.NOT_APPLICABLE)
+    failed_count = sum(1 for s in workflow.steps if s.status == StepStatus.FAILED)
+    pending_count = sum(1 for s in workflow.steps if s.status in [StepStatus.PENDING, StepStatus.RUNNING, StepStatus.VERIFYING, StepStatus.RECOVERING])
+
     workflow.metrics = {
         "total_duration_seconds": round(total_duration, 2),
-        "steps_verified": sum(1 for s in workflow.steps if s.status == StepStatus.VERIFIED_SUCCESS),
+        "total_steps": len(workflow.steps),
+        "steps_total": len(workflow.steps),
+        "verified_steps": verified_count,
+        "steps_verified": verified_count,
+        "not_applicable_steps": na_count,
+        "failed_steps": failed_count,
+        "pending_steps": pending_count,
         "retries_count": 0,
         "recoveries_count": 0,
     }
+
+    report_data = orchestrator.get_final_report_data(workflow.workflow_id)
+    if report_data:
+        workflow.final_report = report_data
+        if workflow.metadata is None:
+            workflow.metadata = {}
+        workflow.metadata["final_report"] = report_data.model_dump()
 
     orchestrator.emit_event(
         workflow,
@@ -404,8 +423,8 @@ def run_demo_workflow(
         message="Workflow completed successfully. All steps verified.",
         metadata={
             "total_steps": len(workflow.steps),
-            "verified_steps": sum(1 for s in workflow.steps if s.status == StepStatus.VERIFIED_SUCCESS),
-            "not_applicable_steps": sum(1 for s in workflow.steps if s.status == StepStatus.NOT_APPLICABLE),
+            "verified_steps": verified_count,
+            "not_applicable_steps": na_count,
             "duration_seconds": round(total_duration, 2),
         },
     )

@@ -328,8 +328,11 @@ export default function DashboardPage() {
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-mono text-slate-300">
                 {filteredWorkflows.map((wf) => {
-                  const completedSteps = (wf.steps || []).filter((s) =>
-                    ["SUCCESS", "VERIFIED_SUCCESS", "NOT_APPLICABLE", "PARTIALLY_SATISFIED"].includes(s.status)
+                  const verifiedSteps = (wf.steps || []).filter((s) =>
+                    ["SUCCESS", "VERIFIED_SUCCESS"].includes(s.status)
+                  ).length;
+                  const naSteps = (wf.steps || []).filter((s) =>
+                    ["NOT_APPLICABLE", "SKIPPED"].includes(s.status)
                   ).length;
                   const repoClean = (wf.repository || "").replace("https://github.com/", "");
                   const durationStr = getWorkflowDuration(wf);
@@ -371,8 +374,13 @@ export default function DashboardPage() {
                       </td>
 
                       <td className="py-3 px-4 whitespace-nowrap text-slate-400">
-                        <span className="text-slate-200 font-semibold">{completedSteps}</span>
+                        <span className="text-slate-200 font-semibold">{verifiedSteps}</span>
                         <span className="text-slate-600">/{wf.steps ? wf.steps.length : 0}</span>
+                        {naSteps > 0 && (
+                          <span className="text-[10px] text-slate-500 block font-sans">
+                            {naSteps} N/A
+                          </span>
+                        )}
                       </td>
 
                       <td className="py-3 px-4 whitespace-nowrap text-slate-300">

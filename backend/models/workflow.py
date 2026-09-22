@@ -131,6 +131,8 @@ class FailureType(str, Enum):
     HEALTH_CHECK_FAILURE = "HEALTH_CHECK_FAILURE"
     PROCESS_EXITED = "PROCESS_EXITED"
     SERVICE_NOT_LISTENING = "SERVICE_NOT_LISTENING"
+    COMMAND_NOT_FOUND = "COMMAND_NOT_FOUND"
+    EXECUTABLE_NOT_FOUND = "EXECUTABLE_NOT_FOUND"
     UNKNOWN_ERROR = "UNKNOWN_ERROR"
 
 
@@ -400,6 +402,67 @@ class WorkflowCreateResponse(BaseModel):
     status: WorkflowStatus
 
 
+class ExecuteStepRequest(BaseModel):
+    step_id: Optional[str] = None
+
+
+class VerifyStepRequest(BaseModel):
+    """
+    Used when external Verifier posts verification results directly to the workflow API.
+    """
+    step_id: Optional[str] = None
+    verification_result: VerificationResult
+
+
+class RecommendedFix(BaseModel):
+    id: str  # e.g. "FIX 01"
+    title: str  # e.g. "Run tests — pytest executable not found"
+    step: str  # e.g. "Run tests"
+    what_happened: str
+    diagnosis: str
+    recommended_fix: str
+    status: str = "ACTION REQUIRED"  # "RECOVERED" | "ACTION REQUIRED" | "UNVERIFIED"
+    severity: str = "HIGH"  # "HIGH" | "MEDIUM" | "LOW"
+    recovery_attempted: Optional[str] = None
+    recovery_result: Optional[str] = None
+    retries: int = 0
+    failure_type: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+class RecommendedFixesSummary(BaseModel):
+    issues_found: int = 0
+    recovered_automatically: int = 0
+    action_required: int = 0
+    retries: int = 0
+
+
+class FinalReportData(BaseModel):
+    workflow_id: str
+    repository: str
+    task: str
+    final_status: str
+    steps_completed: int
+    total_steps: int
+    verified_steps: int = 0
+    not_applicable_steps: int = 0
+    failed_steps: int = 0
+    pending_steps: int = 0
+    recoveries: int
+    retries: int
+    duration_seconds: float
+    verification_summary: Dict[str, str] = Field(default_factory=dict)
+    recovery_history: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence_records: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence_digests: Dict[str, str] = Field(default_factory=dict)
+    recoveries_attempted: int = 0
+    recoveries_verified_effective: int = 0
+    recoveries_unrecoverable: int = 0
+    summary: Optional[str] = None
+    recommended_fixes: List[RecommendedFix] = Field(default_factory=list)
+    fixes_summary: Optional[RecommendedFixesSummary] = None
+
+
 class WorkflowState(BaseModel):
     workflow_id: str
     repository: str
@@ -420,36 +483,6 @@ class WorkflowState(BaseModel):
     metrics: Dict[str, Any] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     final_status: Optional[str] = None
+    final_report: Optional[FinalReportData] = None
     created_at: str = Field(default_factory=current_iso_time)
     updated_at: str = Field(default_factory=current_iso_time)
-
-
-class ExecuteStepRequest(BaseModel):
-    step_id: Optional[str] = None
-
-
-class VerifyStepRequest(BaseModel):
-    """
-    Used when external Verifier posts verification results directly to the workflow API.
-    """
-    step_id: Optional[str] = None
-    verification_result: VerificationResult
-
-
-class FinalReportData(BaseModel):
-    workflow_id: str
-    repository: str
-    task: str
-    final_status: str
-    steps_completed: int
-    total_steps: int
-    recoveries: int
-    retries: int
-    duration_seconds: float
-    verification_summary: Dict[str, str] = Field(default_factory=dict)
-    recovery_history: List[Dict[str, Any]] = Field(default_factory=list)
-    evidence_records: List[Dict[str, Any]] = Field(default_factory=list)
-    evidence_digests: Dict[str, str] = Field(default_factory=dict)
-    recoveries_attempted: int = 0
-    recoveries_verified_effective: int = 0
-    recoveries_unrecoverable: int = 0
