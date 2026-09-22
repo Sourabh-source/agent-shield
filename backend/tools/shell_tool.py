@@ -447,6 +447,7 @@ def execute_shell_command(
                 duration_ms=duration_ms,
                 timestamp=current_iso_time(),
                 workspace=resolved_cwd,
+                timeout_seconds=timeout_seconds,
                 metadata={"timed_out": True},
             )
 
@@ -463,6 +464,7 @@ def execute_shell_command(
                 duration_ms=duration_ms,
                 timestamp=current_iso_time(),
                 workspace=resolved_cwd,
+                timeout_seconds=timeout_seconds,
             )
 
     duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
@@ -480,6 +482,7 @@ def execute_shell_command(
         duration_ms=duration_ms,
         timestamp=current_iso_time(),
         workspace=resolved_cwd,
+        timeout_seconds=timeout_seconds,
     )
 
 

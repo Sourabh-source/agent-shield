@@ -29,6 +29,7 @@ from backend.models.workflow import (
     FinalReportData,
     ProjectAnalysis,
     RecoveryAttempt,
+    RecoveryOutcome,
     StepDefinition,
     StepStatus,
     StepType,
@@ -588,6 +589,45 @@ class WorkflowOrchestrator:
                                 evidence=rec_plan.model_dump(),
                             )
 
+                            if rec_plan.expected_outcome == RecoveryOutcome.UNRECOVERABLE or rec_plan.action_type == "unrecoverable":
+                                step.status = StepStatus.FAILED
+                                workflow.overall_status = WorkflowStatus.VERIFIED_FAILURE
+                                workflow.final_result = (
+                                    f"Workflow halted at step '{step.name}' with VERIFIED FAILURE: "
+                                    f"Failure is unrecoverable ({rec_plan.reason})."
+                                )
+                                attempt = RecoveryAttempt(
+                                    recovery_id=rec_plan.recovery_id,
+                                    step_name=step.name,
+                                    failure_type=rec_plan.failure_type,
+                                    action="unrecoverable",
+                                    status=RecoveryOutcome.UNRECOVERABLE,
+                                    exit_code=1,
+                                    duration_ms=0.0,
+                                    step_resolved=False,
+                                )
+                                workflow.recovery_history.append(attempt)
+                                recovery_attempts_total.labels(failure_type=rec_plan.failure_type, outcome="unrecoverable").inc()
+                                self.emit_event(
+                                    workflow,
+                                    EventType.WORKFLOW_FAILED,
+                                    step=step.name,
+                                    step_id=step.id,
+                                    execution_id=exec_result.execution_id,
+                                    status=WorkflowStatus.VERIFIED_FAILURE.value,
+                                    message=workflow.final_result,
+                                    evidence={
+                                        "failed_step": step.name,
+                                        "unrecoverable_reason": rec_plan.reason,
+                                    },
+                                )
+                                workflow_store.save(workflow)
+                                return workflow
+
+                            # Apply any step-level overrides (such as extended timeout)
+                            if rec_plan.action_type == "extend_timeout" and rec_plan.timeout_override:
+                                step.timeout_seconds = rec_plan.timeout_override
+
                             # Check if recovery is already satisfied (idempotent check)
                             if recovery_planner.is_action_already_satisfied(rec_plan, executor.workspace_dir):
                                 logger.info("Recovery condition already satisfied. Proceeding to retry directly.")
@@ -610,10 +650,10 @@ class WorkflowOrchestrator:
 
                                 # Postcondition evaluation: verify recovery actually succeeded
                                 postcond_met = recovery_planner.evaluate_postcondition(
-                                    rec_plan, executor.workspace_dir
+                                    rec_plan, executor.workspace_dir, step=step
                                 )
-                                rec_status = "SUCCESS" if (rec_result.exit_code == 0 and postcond_met) else "FAILED"
-                                recovery_attempts_total.labels(failure_type=rec_plan.failure_type, outcome=rec_status.lower()).inc()
+                                rec_status = RecoveryOutcome.SUCCESS if (rec_result.exit_code == 0 and postcond_met) else RecoveryOutcome.FAILED
+                                recovery_attempts_total.labels(failure_type=rec_plan.failure_type, outcome=rec_status.value.lower()).inc()
 
                                 attempt = RecoveryAttempt(
                                     recovery_id=rec_plan.recovery_id,

@@ -8,7 +8,15 @@ import subprocess
 import sys
 from typing import Optional, Tuple
 
-from backend.models.workflow import ExecutionResult, FailureClassification, FailureType, RecoveryPlan
+from backend.config import settings
+from backend.models.workflow import (
+    ExecutionResult,
+    FailureClassification,
+    FailureType,
+    RecoveryOutcome,
+    RecoveryPlan,
+    StepDefinition,
+)
 from backend.tools.registry import tool_registry
 
 logger = logging.getLogger("agentguard.recovery_planner")
@@ -24,6 +32,8 @@ class RecoveryPlanner:
         self,
         plan: RecoveryPlan,
         workspace_dir: Optional[str] = None,
+        execution_result: Optional[ExecutionResult] = None,
+        step: Optional[StepDefinition] = None,
     ) -> bool:
         """
         Machine-checkable postcondition evaluation.
@@ -77,10 +87,29 @@ class RecoveryPlanner:
                 target_path = Path(workspace_dir) / target_path
             return target_path.exists()
 
-        elif post_type in ["resource_ready", "custom", None]:
-            if plan.command.strip().startswith("echo"):
-                return True
-            return True
+        elif post_type == "timeout_extended":
+            target_timeout = None
+            if target:
+                try:
+                    target_timeout = int(target)
+                except ValueError:
+                    pass
+            if target_timeout is None and plan.timeout_override is not None:
+                target_timeout = plan.timeout_override
+            if target_timeout is None:
+                return False
+
+            if execution_result is not None:
+                if execution_result.timeout_seconds is not None:
+                    return execution_result.timeout_seconds >= target_timeout
+                return False
+
+            if step is not None:
+                if getattr(step, "timeout_seconds", None) is not None:
+                    return step.timeout_seconds >= target_timeout
+                return False
+
+            return False
 
         # Fallback to postcondition_cmd if explicitly specified
         if plan.postcondition_cmd:
@@ -183,6 +212,20 @@ class RecoveryPlanner:
 
         # 2. Timeout
         elif classification.failure_type == FailureType.TIMEOUT:
+            current_timeout = exec_result.timeout_seconds or settings.DEFAULT_TIMEOUT_SECONDS
+            if current_timeout >= settings.MAX_STEP_TIME:
+                return RecoveryPlan(
+                    reason=f"Timeout budget exhausted ({current_timeout}s >= MAX_STEP_TIME {settings.MAX_STEP_TIME}s)",
+                    failure_type=failure_type,
+                    action_type="unrecoverable",
+                    tool="none",
+                    command=None,
+                    target_step=target_step,
+                    max_attempts=0,
+                    expected_outcome=RecoveryOutcome.UNRECOVERABLE,
+                )
+
+            new_timeout = min(max(current_timeout * 2, current_timeout + 5), settings.MAX_STEP_TIME)
             cmd = suggested_action or f'"{sys.executable}" -c "print(\'Timeout recovery: extended duration allocated for retry\')"'
             return RecoveryPlan(
                 reason=classification.reason,
@@ -192,8 +235,10 @@ class RecoveryPlanner:
                 command=cmd,
                 target_step=target_step,
                 max_attempts=max_attempts,
-                postcondition_type="resource_ready",
-                postcondition_target="timeout_extended",
+                timeout_override=new_timeout,
+                postcondition_type="timeout_extended",
+                postcondition_target=str(new_timeout),
+                expected_outcome=RecoveryOutcome.SUCCESS,
             )
 
         # 3. Port Error
@@ -220,17 +265,20 @@ class RecoveryPlanner:
 
         # 4. Resource Limit
         elif classification.failure_type == FailureType.RESOURCE_LIMIT:
-            cmd = suggested_action or f'"{sys.executable}" -c "import gc; gc.collect(); print(\'Resource recovery: garbage collection executed\')"'
+            reason = (
+                f"{classification.reason}: No verifiable remediation available for this resource class; escalating as unrecoverable"
+                if classification.reason
+                else "No verifiable remediation available for this resource class; escalating as unrecoverable"
+            )
             return RecoveryPlan(
-                reason=classification.reason,
+                reason=reason,
                 failure_type=failure_type,
-                action_type="cleanup_resources",
-                tool="python" if not suggested_action else "shell",
-                command=cmd,
+                action_type="unrecoverable",
+                tool="none",
+                command=None,
                 target_step=target_step,
-                max_attempts=max_attempts,
-                postcondition_type="resource_ready",
-                postcondition_target="memory_reclaimed",
+                max_attempts=0,
+                expected_outcome=RecoveryOutcome.UNRECOVERABLE,
             )
 
         # 5. Fallback recovery
@@ -240,6 +288,7 @@ class RecoveryPlanner:
             tool = resolved_tool.name
 
         action_type = "custom_remediation" if suggested_action else "unrecoverable"
+        expected_outcome = RecoveryOutcome.SUCCESS if suggested_action else RecoveryOutcome.UNRECOVERABLE
 
         return RecoveryPlan(
             reason=classification.reason,
@@ -249,8 +298,9 @@ class RecoveryPlanner:
             command=suggested_action or None,
             target_step=target_step,
             max_attempts=max_attempts if suggested_action else 0,
-            postcondition_type="resource_ready",
-            postcondition_target=target_step,
+            postcondition_type="custom" if suggested_action else None,
+            postcondition_target=target_step if suggested_action else None,
+            expected_outcome=expected_outcome,
         )
 
 

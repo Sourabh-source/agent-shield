@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 from pydantic import BaseModel, Field
 
@@ -109,29 +109,48 @@ class FailureClassification(BaseModel):
     source_evidence: Optional[str] = None
 
 
+class RecoveryOutcome(str, Enum):
+    """
+    Contract for recovery intervention outcomes:
+    - SUCCESS: Machine-checkable postcondition evaluated and passed.
+    - FAILED: Postcondition evaluated and failed (or recovery command crashed).
+    - UNVERIFIABLE: Recovery executed but lacks an automated postcondition (never claimed as SUCCESS).
+    - UNRECOVERABLE: Diagnosed failure class cannot be safely auto-remediated; halts retries honestly.
+    """
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    UNVERIFIABLE = "UNVERIFIABLE"
+    UNRECOVERABLE = "UNRECOVERABLE"
+
+
 class RecoveryPlan(BaseModel):
     recovery_id: str = Field(default_factory=lambda: str(uuid4())[:8])
     reason: str
     failure_type: str
     action_type: str
     tool: str
-    command: str
+    command: Optional[str] = None
     target_step: str
     max_attempts: int = 2
     postcondition_type: Optional[str] = None
     postcondition_target: Optional[str] = None
     postcondition_cmd: Optional[str] = None
+    expected_outcome: RecoveryOutcome = RecoveryOutcome.SUCCESS
+    timeout_override: Optional[int] = None
+    new_port: Optional[int] = None
+    rewritten_command: Optional[str] = None
 
 
 class RecoveryAttempt(BaseModel):
     recovery_id: str
     step_name: str
     failure_type: str
-    action: str
-    status: str = "COMPLETED"
+    action: Optional[str] = None
+    status: Union[RecoveryOutcome, str] = RecoveryOutcome.SUCCESS
     exit_code: int = 0
     duration_ms: float = 0.0
     timestamp: str = Field(default_factory=current_iso_time)
+    step_resolved: bool = False
 
 
 # Hand-off models between Orchestrator, Verifier, and Frontend
@@ -177,6 +196,7 @@ class ExecutionResult(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     evidence_digest: Optional[str] = None
     step_type: Optional[str] = None
+    timeout_seconds: Optional[int] = None
 
     def model_post_init(self, __context: Any) -> None:
         if not self.action:
@@ -297,6 +317,7 @@ class StepDefinition(BaseModel):
     verification_result: Optional[VerificationResult] = None
     evidence: Optional[EvidenceRecord] = None
     evidence_digest: Optional[str] = None
+    timeout_seconds: Optional[int] = None
 
 
 class WorkflowCreateRequest(BaseModel):
@@ -328,6 +349,7 @@ class WorkflowState(BaseModel):
     dry_run: bool = False
     owner_id: Optional[str] = "default-owner"
     recovery_history: List[RecoveryAttempt] = Field(default_factory=list)
+    spawned_pids: List[int] = Field(default_factory=list)
     metrics: Dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=current_iso_time)
     updated_at: str = Field(default_factory=current_iso_time)
@@ -359,3 +381,6 @@ class FinalReportData(BaseModel):
     recovery_history: List[Dict[str, Any]] = Field(default_factory=list)
     evidence_records: List[Dict[str, Any]] = Field(default_factory=list)
     evidence_digests: Dict[str, str] = Field(default_factory=dict)
+    recoveries_attempted: int = 0
+    recoveries_verified_effective: int = 0
+    recoveries_unrecoverable: int = 0

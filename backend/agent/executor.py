@@ -245,7 +245,11 @@ class ToolExecutor:
                     workspace=self.workspace_dir,
                 )
 
-            timeout = min(settings.DEFAULT_TIMEOUT_SECONDS, settings.MAX_STEP_TIME)
+            timeout = (
+                step.timeout_seconds
+                if step.timeout_seconds is not None
+                else min(settings.DEFAULT_TIMEOUT_SECONDS, settings.MAX_STEP_TIME)
+            )
             
             tool = None
             if step.tool:
@@ -253,7 +257,7 @@ class ToolExecutor:
             if not tool:
                 tool = tool_registry.resolve_tool_for_command(cmd)
 
-            return tool.execute(
+            result = tool.execute(
                 command=cmd,
                 cwd=self.workspace_dir,
                 timeout_seconds=timeout,
@@ -261,6 +265,13 @@ class ToolExecutor:
                 step_name=step.name,
                 step_id=step.id,
             )
+            if result.timeout_seconds is None:
+                result.timeout_seconds = timeout
+            if result.metadata is None:
+                result.metadata = {}
+            if "timeout_seconds" not in result.metadata:
+                result.metadata["timeout_seconds"] = timeout
+            return result
 
     def execute_recovery_action(
         self,
