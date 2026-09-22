@@ -514,6 +514,9 @@ class WorkflowOrchestrator:
                         # PASS: mark verified success and continue
                         step.status = StepStatus.VERIFIED_SUCCESS
                         step_verified = True
+                        for att in workflow.recovery_history:
+                            if att.step_name == step.name and att.status in (RecoveryOutcome.SUCCESS, "SUCCESS"):
+                                att.step_resolved = True
                         self.emit_event(
                             workflow,
                             EventType.VERIFICATION_PASSED,
@@ -1308,6 +1311,7 @@ class WorkflowOrchestrator:
                 "action": r.action,
                 "status": r.status,
                 "exit_code": r.exit_code,
+                "step_resolved": getattr(r, "step_resolved", False),
             }
             for r in workflow.recovery_history
         ]
@@ -1324,6 +1328,16 @@ class WorkflowOrchestrator:
 
         duration = workflow.metrics.get("total_duration_seconds", 0.0)
 
+        recoveries_attempted = len(workflow.recovery_history)
+        recoveries_verified_effective = sum(
+            1 for r in workflow.recovery_history
+            if getattr(r, "step_resolved", False) is True
+        )
+        recoveries_unrecoverable = sum(
+            1 for r in workflow.recovery_history
+            if (r.status == RecoveryOutcome.UNRECOVERABLE or str(r.status).upper() == "UNRECOVERABLE")
+        )
+
         return FinalReportData(
             workflow_id=workflow.workflow_id,
             repository=workflow.repository,
@@ -1334,6 +1348,9 @@ class WorkflowOrchestrator:
             ),
             total_steps=len(workflow.steps),
             recoveries=len(workflow.recovery_history),
+            recoveries_attempted=recoveries_attempted,
+            recoveries_verified_effective=recoveries_verified_effective,
+            recoveries_unrecoverable=recoveries_unrecoverable,
             retries=workflow.retries,
             duration_seconds=duration,
             verification_summary=verif_summary,
