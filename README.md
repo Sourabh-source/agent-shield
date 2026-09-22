@@ -113,14 +113,23 @@ cd frontend
 # Install dependencies
 npm install
 
+# Configure server-only environment variables
+# Copy .env.example to .env.local and set AGENTGUARD_API_KEY to an authorized backend key (e.g. test-api-key)
+# IMPORTANT: This key is strictly server-only. NEVER prefix with NEXT_PUBLIC_!
+copy .env.example .env.local
+
 # Run Next.js frontend (port 3000)
 npm run dev
 ```
 - Web Application: [http://localhost:3000](http://localhost:3000)
 
-### 3. Run Full Automated Test Suite (396+ Passing)
+### 3. Run Full Automated Test Suite (402+ Passing)
 ```powershell
+# Backend & integration test suite (including auth proxy tests)
 .\.venv\Scripts\pytest -v
+
+# Frontend proxy & secret isolation test suite
+cd frontend && npm test
 ```
 
 ### 4. Run Demo Scenarios Verification Suite (All 7 Passing)
@@ -172,7 +181,12 @@ REQUIRE_EVIDENCE_DIGEST=true
 
 ### Frontend (`frontend/.env.local`)
 ```ini
-NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+# Backend API Base URL for server-side proxy
+BACKEND_URL=http://127.0.0.1:8000
+
+# Server-only API key for authenticating with the AgentGuard backend
+# CRITICAL: Do NOT prefix with NEXT_PUBLIC_. This key is kept on the Next.js server.
+AGENTGUARD_API_KEY=test-api-key
 ```
 
 ---

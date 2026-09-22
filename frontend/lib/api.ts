@@ -1,11 +1,15 @@
 /**
  * AgentGuard API Client
  * Central service for all backend communication.
- * Backend URL is configurable via NEXT_PUBLIC_API_URL environment variable.
- * SECURITY: No secrets exposed to the browser. Only the API base URL is public.
+ * Requests are proxied via Next.js server route handler (/api/backend)
+ * which attaches the server-held X-API-Key header.
+ * SECURITY: Secrets remain strictly on the server; the browser never sees the API key.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const API_BASE =
+  typeof window !== "undefined"
+    ? "/api/backend"
+    : (process.env.NEXT_INTERNAL_URL || `http://127.0.0.1:${process.env.PORT || 3000}/api/backend`);
 
 export interface WorkflowCreateRequest {
   repo_url: string;
@@ -138,13 +142,45 @@ export interface FinalReportData {
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${path}`;
   const res = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
     signal: options?.signal || AbortSignal.timeout(10000),
     ...options,
   });
   if (!res.ok) {
     const errorText = await res.text();
-    throw new Error(`API ${res.status}: ${errorText}`);
+    let message = "";
+    try {
+      const parsed = JSON.parse(errorText);
+      if (
+        parsed.error === "Server misconfiguration" ||
+        (parsed.message && parsed.message.includes("AGENTGUARD_API_KEY"))
+      ) {
+        throw new Error(
+          "Server misconfiguration: Server is not configured with a backend API key. Set AGENTGUARD_API_KEY in frontend/.env.local (do NOT use NEXT_PUBLIC_ prefix)."
+        );
+      }
+      if (res.status === 401) {
+        throw new Error(
+          "Your API key was rejected — check that AGENTGUARD_API_KEY matches an authorized key in the backend and hasn't been revoked."
+        );
+      }
+      message = parsed.detail || parsed.message || parsed.error || errorText;
+    } catch (e: unknown) {
+      if (
+        e instanceof Error &&
+        (e.message.startsWith("Server misconfiguration") ||
+          e.message.startsWith("Your API key was rejected"))
+      ) {
+        throw e;
+      }
+      if (res.status === 401) {
+        throw new Error(
+          "Your API key was rejected — check that AGENTGUARD_API_KEY matches an authorized key in the backend and hasn't been revoked."
+        );
+      }
+      message = errorText || `API error (${res.status})`;
+    }
+    throw new Error(message);
   }
   return res.json();
 }
