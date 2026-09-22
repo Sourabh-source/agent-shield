@@ -1,6 +1,8 @@
+import hashlib
+import hmac
 import logging
 from typing import Optional
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
 
 from backend.agent.orchestrator import WorkflowOrchestrator, workflow_store
 from backend.config import settings
@@ -18,15 +20,26 @@ logger = logging.getLogger("agentguard.api.workflow")
 router = APIRouter(prefix="/workflow", tags=["workflow"])
 
 
+def verify_workflow_ownership(workflow: WorkflowState, request: Request, workflow_id: str):
+    """Enforces multi-tenancy isolation. Returns 404 on ownership mismatch to prevent enumeration."""
+    caller_owner = getattr(request.state, "owner_id", "default-owner")
+    wf_owner = getattr(workflow, "owner_id", "default-owner")
+    if caller_owner != "admin" and wf_owner and wf_owner != caller_owner:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow '{workflow_id}' not found",
+        )
+
+
 @router.post("/start", response_model=WorkflowCreateResponse, status_code=status.HTTP_201_CREATED)
 def start_workflow(
     payload: WorkflowCreateRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
 ) -> WorkflowCreateResponse:
     """
-    Initializes a new workflow for a GitHub repository and starts the
-    orchestrator in the background.
-    Supports dry_run and demo_failure_mode options.
+    Initializes a new workflow for a Git repository and starts orchestrator in the background.
+    Binds the workflow to the authenticated tenant owner.
     """
     repo_url = payload.repo_url.strip()
     if not repo_url:
@@ -41,12 +54,16 @@ def start_workflow(
             detail="Invalid or prohibited characters in repository URL",
         )
 
+    owner_id = getattr(request.state, "owner_id", "default-owner")
+    demo_mode = getattr(payload, "demo_failure_mode", None)
+
     orchestrator = WorkflowOrchestrator()
     workflow = orchestrator.create_workflow(
         repo_url=repo_url,
         task=payload.task.strip(),
         dry_run=payload.dry_run,
-        demo_failure_mode=payload.demo_failure_mode,
+        demo_failure_mode=demo_mode,
+        owner_id=owner_id,
     )
 
     # Launch execution loop in background
@@ -59,13 +76,16 @@ def start_workflow(
 
 
 @router.post("/{workflow_id}/execute", response_model=WorkflowState)
-def execute_workflow_step(
+def execute_workflow(
     workflow_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
     payload: Optional[ExecuteStepRequest] = None,
+    sync: bool = False,
 ) -> WorkflowState:
     """
-    Triggers or resumes execution of the workflow.
-    Can be used by Member 1/2 to continue execution or test step execution directly.
+    Triggers execution of the workflow in background.
+    Guarded by tenant ownership and strict FSM transition validation.
     """
     workflow = workflow_store.get(workflow_id)
     if not workflow:
@@ -74,49 +94,79 @@ def execute_workflow_step(
             detail=f"Workflow '{workflow_id}' not found",
         )
 
+    verify_workflow_ownership(workflow, request, workflow_id)
+
+    # Strict FSM validation: terminal states cannot be re-executed
+    if workflow.overall_status in [
+        WorkflowStatus.COMPLETED,
+        WorkflowStatus.CANCELLED,
+        WorkflowStatus.BUDGET_EXCEEDED,
+    ]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot execute workflow in terminal state '{workflow.overall_status.value}'",
+        )
+
     orchestrator = WorkflowOrchestrator()
 
-    # If workflow is not in a terminal state, run execution
-    if workflow.overall_status not in [
-        WorkflowStatus.COMPLETED,
-        WorkflowStatus.VERIFIED_FAILURE,
-        WorkflowStatus.CANCELLED,
-    ]:
+    if sync:
         orchestrator.run_workflow(workflow_id)
-
-    updated = workflow_store.get(workflow_id)
-    return updated or workflow
+        updated = workflow_store.get(workflow_id)
+        return updated or workflow
+    else:
+        background_tasks.add_task(orchestrator.run_workflow, workflow_id)
+        return workflow
 
 
 @router.post("/{workflow_id}/cancel", response_model=WorkflowState)
-def cancel_workflow(workflow_id: str) -> WorkflowState:
+def cancel_workflow(workflow_id: str, request: Request) -> WorkflowState:
     """
     Requests cancellation of a running workflow.
     Child processes will be safely terminated and workflow status updated to CANCELLED.
+    Guarded by tenant ownership.
     """
-    orchestrator = WorkflowOrchestrator()
-    workflow = orchestrator.cancel_workflow(workflow_id)
+    workflow = workflow_store.get(workflow_id)
     if not workflow:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow '{workflow_id}' not found",
         )
-    return workflow
+
+    verify_workflow_ownership(workflow, request, workflow_id)
+
+    orchestrator = WorkflowOrchestrator()
+    cancelled = orchestrator.cancel_workflow(workflow_id)
+    return cancelled or workflow
 
 
 @router.post("/{workflow_id}/resume", response_model=WorkflowState)
 def resume_workflow(
     workflow_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
 ) -> WorkflowState:
     """
     Resumes a workflow from its SQLite checkpoint, skipping already verified steps.
+    Guarded by tenant ownership and strict FSM transition validation.
     """
     workflow = workflow_store.get(workflow_id)
     if not workflow:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow '{workflow_id}' not found",
+        )
+
+    verify_workflow_ownership(workflow, request, workflow_id)
+
+    if workflow.overall_status == WorkflowStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot resume a workflow that is already COMPLETED",
+        )
+    if workflow.overall_status == WorkflowStatus.CANCELLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot resume a workflow that has been CANCELLED",
         )
 
     orchestrator = WorkflowOrchestrator()
@@ -128,15 +178,36 @@ def resume_workflow(
 def external_verify(
     workflow_id: str,
     payload: VerifyStepRequest,
+    request: Request,
+    x_agentguard_verify_signature: Optional[str] = Header(None, alias="X-AgentGuard-Verify-Signature"),
     x_agentguard_verify_token: Optional[str] = Header(None, alias="X-AgentGuard-Verify-Token"),
 ) -> WorkflowState:
     """
-    Integration hook for Member 3's Evidence Engine.
-    Allows external verifier to post machine evidence decisions directly into the workflow.
-    Routes to the orchestrator state machine to continue, recover/retry, or fail safely.
-    Does NOT implement Member 3's verification rules internally.
+    Integration hook for Evidence Engine verification.
+    Enforces HMAC-SHA256 signature verification or verification token auth.
+    Guarded by tenant ownership.
     """
-    if getattr(settings, "VERIFY_TOKEN", None):
+    workflow = workflow_store.get(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow '{workflow_id}' not found",
+        )
+
+    verify_workflow_ownership(workflow, request, workflow_id)
+
+    # HMAC-SHA256 signature verification
+    if x_agentguard_verify_signature:
+        secret = getattr(settings, "VERIFY_HMAC_SECRET", "agentguard-hmac-secret-key-prod")
+        step_part = payload.step_id or ""
+        msg = f"{workflow_id}:{step_part}".encode("utf-8")
+        expected_sig = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(x_agentguard_verify_signature, expected_sig):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid X-AgentGuard-Verify-Signature HMAC signature",
+            )
+    elif getattr(settings, "VERIFY_TOKEN", None):
         if not x_agentguard_verify_token or x_agentguard_verify_token != settings.VERIFY_TOKEN:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

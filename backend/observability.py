@@ -1,13 +1,36 @@
 import contextvars
+import json
 import logging
 import time
+from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from backend.tools.shell_tool import redact_secrets
+
 correlation_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
     "correlation_id", default=""
 )
+
+
+class JsonFormatter(logging.Formatter):
+    """
+    Structured JSON log formatter with automated credential & secret redaction.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        cid = getattr(record, "correlation_id", None) or correlation_id_ctx.get() or "system"
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": redact_secrets(record.getMessage()),
+            "correlation_id": cid,
+        }
+        if record.exc_info:
+            log_entry["exception"] = redact_secrets(self.formatException(record.exc_info))
+        return json.dumps(log_entry)
 
 
 def get_correlation_id() -> str:

@@ -131,8 +131,9 @@ class ToolExecutor:
                     workspace=self.workspace_dir,
                 )
 
-            # Security validation: check for dangerous commands
-            is_safe, block_reason = is_safe_command(cmd)
+            # Security validation: check for dangerous commands & parse argv
+            from backend.tools.shell_tool import build_safe_environment, validate_and_parse_command
+            is_safe, block_reason, parsed_cmds = validate_and_parse_command(cmd, cwd=self.workspace_dir)
             if not is_safe:
                 return ExecutionResult(
                     workflow_id=self.workflow_id,
@@ -149,13 +150,25 @@ class ToolExecutor:
 
             start_time = time.perf_counter()
             try:
+                import sys
+                argv = list(parsed_cmds[0]) if parsed_cmds else [cmd]
+                if argv[0].lower() in ("python", "python3") and not Path(argv[0]).is_absolute():
+                    argv[0] = sys.executable
+
+                creation_flags = 0
+                if os.name == "nt":
+                    creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+
+                proc_env = build_safe_environment()
                 self.background_process = subprocess.Popen(
-                    cmd,
+                    argv,
                     cwd=self.workspace_dir,
-                    shell=True,
+                    shell=False,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    creationflags=creation_flags,
+                    env=proc_env,
                 )
                 if self.background_process.pid:
                     self._spawned_pids.add(self.background_process.pid)

@@ -32,7 +32,7 @@ from backend.models.workflow import (
 )
 from backend.agent.orchestrator import WorkflowOrchestrator, workflow_store
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-API-Key": "test-api-key"})
 
 
 # =========================================================================

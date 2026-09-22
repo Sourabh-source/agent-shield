@@ -62,9 +62,14 @@ class SQLiteCheckpointStorage:
                     demo_failure_mode TEXT,
                     metrics TEXT,
                     created_at TEXT,
-                    updated_at TEXT
+                    updated_at TEXT,
+                    owner_id TEXT
                 )
             """)
+            try:
+                cursor.execute("ALTER TABLE workflows ADD COLUMN owner_id TEXT")
+            except Exception:
+                pass
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS workflow_steps (
@@ -128,8 +133,8 @@ class SQLiteCheckpointStorage:
                 INSERT OR REPLACE INTO workflows (
                     workflow_id, repository, task, current_step, overall_status,
                     retries, max_retries, workspace_path, verification_status,
-                    final_result, dry_run, demo_failure_mode, metrics, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    final_result, dry_run, demo_failure_mode, metrics, created_at, updated_at, owner_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 state.workflow_id,
                 state.repository,
@@ -146,6 +151,7 @@ class SQLiteCheckpointStorage:
                 json.dumps(state.metrics),
                 state.created_at,
                 state.updated_at,
+                state.owner_id or "default-owner",
             ))
 
             # Save steps
@@ -282,6 +288,13 @@ class SQLiteCheckpointStorage:
 
             metrics = json.loads(row["metrics"]) if row["metrics"] else {}
 
+            owner_id = "default-owner"
+            try:
+                if "owner_id" in row.keys() and row["owner_id"]:
+                    owner_id = row["owner_id"]
+            except Exception:
+                pass
+
             return WorkflowState(
                 workflow_id=row["workflow_id"],
                 repository=row["repository"],
@@ -297,20 +310,32 @@ class SQLiteCheckpointStorage:
                 final_result=row["final_result"],
                 dry_run=bool(row["dry_run"]),
                 demo_failure_mode=row["demo_failure_mode"],
+                owner_id=owner_id,
                 recovery_history=recovery_history,
                 metrics=metrics,
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )
 
-    def list_workflows(self, limit: Optional[int] = None, offset: int = 0) -> List[WorkflowState]:
+    def list_workflows(
+        self,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        owner_id: Optional[str] = None,
+    ) -> List[WorkflowState]:
         with self._lock:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                query = "SELECT workflow_id FROM workflows ORDER BY created_at DESC"
+                if owner_id and owner_id != "admin":
+                    query = "SELECT workflow_id FROM workflows WHERE owner_id = ? ORDER BY created_at DESC"
+                    params = [owner_id]
+                else:
+                    query = "SELECT workflow_id FROM workflows ORDER BY created_at DESC"
+                    params = []
+
                 if limit is not None and limit > 0:
                     query += f" LIMIT {int(limit)} OFFSET {int(offset)}"
-                cursor.execute(query)
+                cursor.execute(query, params)
                 rows = cursor.fetchall()
                 w_ids = [r["workflow_id"] for r in rows]
 

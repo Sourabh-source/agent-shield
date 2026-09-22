@@ -4,17 +4,20 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api import status_router, workflow_router
 from backend.config import settings
-from backend.observability import ObservabilityMiddleware
+from backend.middleware.auth import AuthMiddleware
+from backend.observability import JsonFormatter, ObservabilityMiddleware
 
-# Configure logging
+# Configure structured JSON logging with secret redaction
+_handler = logging.StreamHandler()
+_handler.setFormatter(JsonFormatter())
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[_handler],
 )
 logger = logging.getLogger("agentguard.main")
 
 app = FastAPI(
-    title="AgentGuard Backend (Member 2)",
+    title="AgentGuard Backend",
     description=(
         "Evidence-Gated Self-Healing Agent Workflow Engine. "
         "Orchestrates AI planning, tool execution, evidence collection, and recovery."
@@ -22,16 +25,19 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Observability middleware: tracing, correlation IDs, and timing
+# 1. Observability middleware: tracing, correlation IDs, and timing
 app.add_middleware(ObservabilityMiddleware)
 
-# CORS middleware for Member 1 frontend integration
+# 2. AuthN / AuthZ & Rate Limiting Middleware
+app.add_middleware(AuthMiddleware)
+
+# 3. CORS middleware with safe defaults
 allow_creds = "*" not in settings.CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=allow_creds,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -69,4 +75,4 @@ def health():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("backend.main:app", host="127.0.0.1", port=8000, reload=True)

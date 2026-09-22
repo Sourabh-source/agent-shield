@@ -37,7 +37,7 @@ from backend.tools.git_tool import clone_repository
 from backend.tools.http_tool import perform_health_check
 from backend.tools.shell_tool import execute_shell_command, is_safe_command
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-API-Key": "test-api-key"})
 
 
 # =========================================================================

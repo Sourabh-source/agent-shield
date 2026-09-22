@@ -2,7 +2,7 @@ import logging
 import sys
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from backend.agent.classifier import classify_failure
@@ -76,19 +76,23 @@ class WorkflowStore:
                     return wf
             return None
 
-    def list_all(self, limit: Optional[int] = None, offset: int = 0) -> List[WorkflowState]:
+    def list_all(
+        self,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        owner_id: Optional[str] = None,
+    ) -> List[WorkflowState]:
         with self._lock:
+            if self.sqlite:
+                return self.sqlite.list_workflows(limit=limit, offset=offset, owner_id=owner_id)
             if self._memory_cache:
                 items = sorted(
                     self._memory_cache.values(),
                     key=lambda w: w.created_at or "",
                     reverse=True,
                 )
-            elif self.sqlite:
-                workflows = self.sqlite.list_workflows()
-                for wf in workflows:
-                    self._memory_cache[wf.workflow_id] = wf
-                items = workflows
+                if owner_id and owner_id != "admin":
+                    items = [w for w in items if getattr(w, "owner_id", "default-owner") == owner_id]
             else:
                 items = []
 
@@ -119,6 +123,7 @@ class WorkflowOrchestrator:
     """
     _running_workflows: set = set()
     _run_lock = threading.Lock()
+    _active_executors: Dict[str, Any] = {}
 
     def __init__(
         self,
@@ -134,6 +139,7 @@ class WorkflowOrchestrator:
         task: str,
         dry_run: bool = False,
         demo_failure_mode: Optional[str] = None,
+        owner_id: Optional[str] = "default-owner",
     ) -> WorkflowState:
         """Initializes a new workflow record and persists initial PENDING state."""
         workflow_id = str(uuid4())[:8]
@@ -145,12 +151,13 @@ class WorkflowOrchestrator:
             max_retries=self.max_retries,
             dry_run=dry_run,
             demo_failure_mode=demo_failure_mode,
+            owner_id=owner_id or "default-owner",
         )
         self.emit_event(
             state,
             EventType.WORKFLOW_STARTED,
             message=f"Workflow initialized for repo: {repo_url}" + (" [DRY RUN]" if dry_run else ""),
-            metadata={"dry_run": dry_run, "demo_failure_mode": demo_failure_mode},
+            metadata={"dry_run": dry_run, "demo_failure_mode": demo_failure_mode, "owner_id": state.owner_id},
         )
         workflow_store.save(state)
         return state
@@ -218,6 +225,16 @@ class WorkflowOrchestrator:
             message="Workflow cancellation requested.",
         )
         workflow_store.save(workflow)
+
+        # Terminate any running processes immediately
+        with self._run_lock:
+            active_exec = self._active_executors.get(workflow_id)
+        if active_exec:
+            try:
+                active_exec.cleanup()
+            except Exception as e:
+                logger.error(f"Error terminating executor processes on cancellation: {e}")
+
         return workflow
 
     def run_workflow(self, workflow_id: str, resume: bool = False) -> WorkflowState:
@@ -274,6 +291,8 @@ class WorkflowOrchestrator:
             return workflow
 
         executor = ToolExecutor(workflow_id=workflow.workflow_id)
+        with self._run_lock:
+            self._active_executors[workflow.workflow_id] = executor
         workflow.workspace_path = executor.workspace_dir
         workflow.overall_status = WorkflowStatus.RUNNING
         workflow_store.save(workflow)
@@ -299,25 +318,18 @@ class WorkflowOrchestrator:
                     logger.info(f"Resuming: step '{step.name}' already verified. Skipping.")
                     continue
 
-                # Skip steps marked NOT_APPLICABLE for this project (unless demo_failure_mode targets this step)
-                is_demo_target = bool(
-                    workflow.demo_failure_mode in ["missing_dependency", "persistent_failure"]
-                    and "build" in step.name.lower()
-                )
+                # Skip steps marked NOT_APPLICABLE for this project
                 if step.status == StepStatus.NOT_APPLICABLE:
-                    if is_demo_target:
-                        step.status = StepStatus.PENDING
-                    else:
-                        logger.info(f"Skipping step '{step.name}': marked NOT_APPLICABLE.")
-                        self.emit_event(
-                            workflow,
-                            EventType.STEP_VERIFIED,
-                            step=step.name,
-                            step_id=step.id,
-                            status=StepStatus.NOT_APPLICABLE.value,
-                            message=f"Step '{step.name}' is NOT_APPLICABLE ({step.reason or 'Not required for this project'}).",
-                        )
-                        continue
+                    logger.info(f"Skipping step '{step.name}': marked NOT_APPLICABLE.")
+                    self.emit_event(
+                        workflow,
+                        EventType.STEP_VERIFIED,
+                        step=step.name,
+                        step_id=step.id,
+                        status=StepStatus.NOT_APPLICABLE.value,
+                        message=f"Step '{step.name}' is NOT_APPLICABLE ({step.reason or 'Not required for this project'}).",
+                    )
+                    continue
 
                 # Check execution budget: max workflow time
                 elapsed_workflow = time.perf_counter() - workflow_start_time
@@ -364,19 +376,7 @@ class WorkflowOrchestrator:
                         workflow_store.save(workflow)
                         return workflow
 
-                    # Real Failure Injection for Demo Scenarios (runs real failing subprocess commands)
                     effective_step = step
-                    if workflow.demo_failure_mode == "missing_dependency" and "build" in step.name.lower():
-                        effective_step = step.model_copy()
-                        effective_step.tool = "python"
-                        if step.retries == 0:
-                            effective_step.command = f'"{sys.executable}" -c "import sys; sys.stderr.write(\'ModuleNotFoundError: No module named \\\"pandas\\\"\\n\'); sys.exit(1)"'
-                        else:
-                            effective_step.command = f'"{sys.executable}" -c "import pandas; print(\'Build verified with resolved dependencies\')"'
-                    elif workflow.demo_failure_mode == "persistent_failure" and "build" in step.name.lower():
-                        effective_step = step.model_copy()
-                        effective_step.tool = "python"
-                        effective_step.command = f'"{sys.executable}" -c "import sys; sys.stderr.write(\'SyntaxError: invalid syntax in main.py\\n\'); sys.exit(1)"'
 
                     # Capture workspace snapshot before execution
                     snap_before = capture_workspace_snapshot(executor.workspace_dir)
@@ -438,7 +438,10 @@ class WorkflowOrchestrator:
                     step.verification_result = verif_result
 
                     # Handle verifier service unavailability
-                    if verif_result.metadata and verif_result.metadata.get("verifier_unavailable"):
+                    if verif_result.metadata and (
+                        verif_result.metadata.get("verifier_unavailable")
+                        or verif_result.metadata.get("service_unavailable")
+                    ):
                         workflow.overall_status = WorkflowStatus.VERIFICATION_UNAVAILABLE
                         step.status = StepStatus.FAILED
                         workflow.final_result = f"Verification unavailable: {verif_result.reason}"
@@ -554,12 +557,18 @@ class WorkflowOrchestrator:
                                     step_id=step.id,
                                 )
 
+                                # Postcondition evaluation: verify recovery actually succeeded
+                                postcond_met = recovery_planner.evaluate_postcondition(
+                                    rec_plan, executor.workspace_dir
+                                )
+                                rec_status = "SUCCESS" if (rec_result.exit_code == 0 and postcond_met) else "FAILED"
+
                                 attempt = RecoveryAttempt(
                                     recovery_id=rec_plan.recovery_id,
                                     step_name=step.name,
                                     failure_type=rec_plan.failure_type,
                                     action=rec_plan.command,
-                                    status="SUCCESS" if rec_result.exit_code == 0 else "FAILED",
+                                    status=rec_status,
                                     exit_code=rec_result.exit_code,
                                     duration_ms=rec_result.duration_ms,
                                 )
@@ -572,9 +581,43 @@ class WorkflowOrchestrator:
                                     step_id=step.id,
                                     execution_id=rec_result.execution_id,
                                     status=StepStatus.RECOVERING.value,
-                                    message=f"Recovery action executed with exit code {rec_result.exit_code}",
-                                    evidence={"exit_code": rec_result.exit_code, "output": rec_result.stdout[:200]},
+                                    message=f"Recovery action executed with exit code {rec_result.exit_code}. Postcondition met: {postcond_met}",
+                                    evidence={
+                                        "exit_code": rec_result.exit_code,
+                                        "postcondition_met": postcond_met,
+                                        "output": rec_result.stdout[:200],
+                                    },
                                 )
+
+                                if not postcond_met:
+                                    logger.warning(
+                                        f"Recovery postcondition failed for step '{step.name}' ({rec_plan.postcondition_target or rec_plan.command}). "
+                                        "Aborting futile retries on original step."
+                                    )
+                                    step.retries += 1
+                                    workflow.retries += 1
+                                    step.status = StepStatus.FAILED
+                                    workflow.overall_status = WorkflowStatus.VERIFIED_FAILURE
+                                    workflow.final_result = (
+                                        f"Workflow halted at step '{step.name}' with VERIFIED FAILURE: "
+                                        f"Recovery action executed but postcondition failed ({rec_plan.postcondition_target or rec_plan.command})."
+                                    )
+                                    self.emit_event(
+                                        workflow,
+                                        EventType.WORKFLOW_FAILED,
+                                        step=step.name,
+                                        step_id=step.id,
+                                        execution_id=rec_result.execution_id,
+                                        status=WorkflowStatus.VERIFIED_FAILURE.value,
+                                        message=workflow.final_result,
+                                        evidence={
+                                            "failed_step": step.name,
+                                            "exit_code": rec_result.exit_code,
+                                            "postcondition_met": False,
+                                        },
+                                    )
+                                    workflow_store.save(workflow)
+                                    return workflow
 
                             # Increment retries
                             step.retries += 1
@@ -658,6 +701,7 @@ class WorkflowOrchestrator:
         finally:
             with self._run_lock:
                 self._running_workflows.discard(workflow_id)
+                self._active_executors.pop(workflow_id, None)
             executor.cleanup()
 
     def run_workflow_in_background(self, workflow_id: str, resume: bool = False):
@@ -763,7 +807,10 @@ class WorkflowOrchestrator:
         workflow.verification_status = "PASS" if verif_result.verified else "FAIL"
 
         # CASE E: Verifier unavailable
-        if verif_result.metadata and verif_result.metadata.get("verifier_unavailable"):
+        if verif_result.metadata and (
+            verif_result.metadata.get("verifier_unavailable")
+            or verif_result.metadata.get("service_unavailable")
+        ):
             workflow.overall_status = WorkflowStatus.VERIFICATION_UNAVAILABLE
             target_step.status = StepStatus.FAILED
             workflow.final_result = f"Verification unavailable: {verif_result.reason}"

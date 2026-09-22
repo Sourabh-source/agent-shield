@@ -117,6 +117,9 @@ class RecoveryPlan(BaseModel):
     command: str
     target_step: str
     max_attempts: int = 2
+    postcondition_type: Optional[str] = None
+    postcondition_target: Optional[str] = None
+    postcondition_cmd: Optional[str] = None
 
 
 class RecoveryAttempt(BaseModel):
@@ -172,6 +175,7 @@ class ExecutionResult(BaseModel):
     workspace: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     evidence_digest: Optional[str] = None
+    step_type: Optional[str] = None
 
     def model_post_init(self, __context: Any) -> None:
         if not self.action:
@@ -222,8 +226,10 @@ def create_evidence_record(
 class VerificationResult(BaseModel):
     """
     Standardized verification decision received by Member 2 from Member 3.
+    Supports tri-state status: VERIFIED, FAILED, UNVERIFIABLE.
     """
     verified: bool
+    status: str = Field(default="VERIFIED")
     reason: Optional[str] = None
     recovery_required: bool = False
     recovery_action: Optional[str] = None
@@ -233,6 +239,14 @@ class VerificationResult(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     execution_id: Optional[str] = None
     evidence_digest: Optional[str] = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.status == "UNVERIFIABLE":
+            self.verified = False
+        elif not self.verified and self.status == "VERIFIED":
+            self.status = "FAILED"
+        elif self.verified and self.status == "FAILED":
+            self.status = "VERIFIED"
 
 
 class WorkflowEvent(BaseModel):
@@ -287,6 +301,9 @@ class WorkflowCreateRequest(BaseModel):
     repo_url: str
     task: str = "Check whether this project can be built and run successfully."
     dry_run: bool = False
+
+
+class InternalWorkflowCreateRequest(WorkflowCreateRequest):
     demo_failure_mode: Optional[str] = None
 
 
@@ -310,6 +327,7 @@ class WorkflowState(BaseModel):
     final_result: Optional[str] = None
     dry_run: bool = False
     demo_failure_mode: Optional[str] = None
+    owner_id: Optional[str] = "default-owner"
     recovery_history: List[RecoveryAttempt] = Field(default_factory=list)
     metrics: Dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=current_iso_time)

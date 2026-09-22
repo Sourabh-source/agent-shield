@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 try:
     from pydantic_settings import BaseSettings
@@ -21,11 +21,22 @@ try:
             default=str(Path(__file__).resolve().parent.parent / "agentguard.db"),
         )
         USE_SQLITE_PERSISTENCE: bool = Field(default=True)
-        CORS_ORIGINS: List[str] = ["*"]
+        CORS_ORIGINS: List[str] = Field(default=["http://localhost:3000"])
         MOCK_VERIFIER: bool = Field(default=True)
         MEMBER3_VERIFIER_URL: Optional[str] = Field(default=None)
         VERIFY_TOKEN: Optional[str] = Field(default=None)
+        VERIFY_HMAC_SECRET: str = Field(default="agentguard-hmac-secret-key-prod")
         REQUIRE_EVIDENCE_DIGEST: bool = Field(default=False)
+        REQUIRE_AUTH: bool = Field(default=True)
+        RATE_LIMIT_PER_MINUTE: int = Field(default=60)
+        API_KEYS: Dict[str, str] = Field(
+            default={
+                "test-api-key": "default-owner",
+                "tenant-a-secret-key-12345": "tenant-a",
+                "tenant-b-secret-key-67890": "tenant-b",
+                "admin-secret-key": "admin",
+            }
+        )
 
         model_config = {
             "env_file": ".env",
@@ -55,11 +66,20 @@ except ImportError:
                 str(Path(__file__).resolve().parent.parent / "agentguard.db"),
             )
             self.USE_SQLITE_PERSISTENCE: bool = os.getenv("USE_SQLITE_PERSISTENCE", "true").lower() in ("true", "1", "yes")
-            self.CORS_ORIGINS: List[str] = ["*"]
+            self.CORS_ORIGINS: List[str] = ["http://localhost:3000"]
             self.MOCK_VERIFIER: bool = os.getenv("MOCK_VERIFIER", "true").lower() in ("true", "1", "yes")
             self.MEMBER3_VERIFIER_URL: Optional[str] = os.getenv("MEMBER3_VERIFIER_URL", None)
-            self.VERIFY_TOKEN: Optional[str] = os.getenv("VERIFY_TOKEN", None)
+            self.VERIFY_TOKEN: Optional[str] = os.getenv("VERIFY_TOKEN", "agentguard-verify-token-secret")
+            self.VERIFY_HMAC_SECRET: str = os.getenv("VERIFY_HMAC_SECRET", "agentguard-hmac-secret-key-prod")
             self.REQUIRE_EVIDENCE_DIGEST: bool = os.getenv("REQUIRE_EVIDENCE_DIGEST", "false").lower() in ("true", "1", "yes")
+            self.REQUIRE_AUTH: bool = os.getenv("REQUIRE_AUTH", "true").lower() in ("true", "1", "yes")
+            self.RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
+            self.API_KEYS: Dict[str, str] = {
+                "test-api-key": "default-owner",
+                "tenant-a-secret-key-12345": "tenant-a",
+                "tenant-b-secret-key-67890": "tenant-b",
+                "admin-secret-key": "admin",
+            }
 
     settings = SimpleSettings()
 

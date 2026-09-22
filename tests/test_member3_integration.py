@@ -241,7 +241,7 @@ def test_member1_api_access_without_internal_orchestrator():
     9: Confirm Member 1 frontend can retrieve workflow status and timeline events
     strictly through the HTTP REST API.
     """
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-API-Key": "test-api-key"})
 
     # 1. Start workflow via API
     start_resp = client.post(

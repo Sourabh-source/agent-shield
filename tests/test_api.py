@@ -4,7 +4,7 @@ from backend.main import app
 from backend.models.workflow import StepDefinition, VerificationResult, WorkflowStatus
 from backend.agent.orchestrator import workflow_store, WorkflowOrchestrator
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-API-Key": "test-api-key"})
 
 
 def test_root_endpoint():
