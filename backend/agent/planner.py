@@ -5,6 +5,7 @@ from pydantic import BaseModel, ValidationError
 
 from backend.config import settings
 from backend.models.workflow import (
+    ExecutionMode,
     ProjectAnalysis,
     ProjectManifest,
     StepDefinition,
@@ -518,6 +519,7 @@ def update_plan_with_analysis(
 
         elif step.type == StepType.START_APPLICATION.value:
             step.timeout_seconds = 120
+            step.execution_mode = getattr(analysis, "execution_mode", ExecutionMode.SHORT_LIVED.value)
             if is_notebook:
                 step.status = StepStatus.NOT_APPLICABLE
                 step.command = None

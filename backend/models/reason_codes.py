@@ -17,4 +17,6 @@ class ReasonCode(str, Enum):
     CLONE_EMPTY = "clone_empty"
     HEALTH_CHECK_FAILED = "health_check_failed"
     HEALTH_CHECK_PASSED = "health_check_passed"
+    PROCESS_EXITED = "process_exited"
+    SERVICE_NOT_LISTENING = "service_not_listening"
     UNKNOWN = "unknown"

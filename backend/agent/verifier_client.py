@@ -2,12 +2,14 @@ import abc
 import logging
 import os
 import re
-from typing import Optional
+from typing import Any, Dict, Optional
 import httpx
 
 from backend.config import settings
-from backend.models.workflow import ExecutionResult, StepType, VerificationResult
+from backend.models.workflow import ExecutionMode, ExecutionResult, StepType, VerificationResult
 from backend.models.reason_codes import ReasonCode
+from backend.tools.port_utils import is_port_in_use
+from backend.tools.project_analyzer import classify_execution_mode
 
 logger = logging.getLogger("agentguard.verifier_client")
 
@@ -70,6 +72,188 @@ class DeterministicEvidenceVerifier(VerificationClient):
             result.metadata = {}
         result.metadata['verifier_version'] = VERIFIER_VERSION
         return result
+
+    def verify_short_lived_execution(
+        self,
+        execution_result: ExecutionResult,
+        metadata: Optional[Dict[str, Any]] = None,
+        stdout: str = "",
+        stderr: str = "",
+        combined_lower: str = "",
+    ) -> VerificationResult:
+        """Verifies short-lived execution (scripts, CLI tools, tests). Success requires exit code 0 and no fatal errors."""
+        if execution_result.exit_code != 0:
+            return VerificationResult(
+                verified=False,
+                status="FAILED",
+                reason=f"Short-lived script failed with exit code {execution_result.exit_code}: {stderr[:150].strip() or stdout[:150].strip() or 'Execution error'}",
+                recovery_required=True,
+                retry_allowed=True,
+                failure_type="RUNTIME_FAILURE",
+                reason_code=ReasonCode.EXIT_NONZERO,
+            )
+
+        fatal_patterns = [
+            "syntaxerror:",
+            "indentationerror:",
+            "modulenotfounderror:",
+            "importerror:",
+            "segmentation fault",
+            "unhandled exception",
+        ]
+        for pat in fatal_patterns:
+            if pat in combined_lower:
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason=f"Short-lived execution completed with exit code 0 but contains fatal error: {pat}",
+                    recovery_required=True,
+                    retry_allowed=True,
+                    failure_type="RUNTIME_FAILURE",
+                    reason_code=ReasonCode.BUILD_ERROR_DETECTED,
+                )
+
+        return VerificationResult(
+            verified=True,
+            status="VERIFIED",
+            reason="Short-lived application/script completed successfully (exit code 0)",
+            recovery_required=False,
+            reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+        )
+
+    def verify_long_running_process(
+        self,
+        execution_result: ExecutionResult,
+        metadata: Optional[Dict[str, Any]] = None,
+        pid: Optional[int] = None,
+        is_alive: Optional[bool] = None,
+    ) -> VerificationResult:
+        """Verifies long-running background daemon/worker process. Process MUST remain alive."""
+        meta = metadata or {}
+        if pid is None:
+            pid = meta.get("pid")
+        if not pid or not isinstance(pid, int) or pid <= 0:
+            return VerificationResult(
+                verified=False,
+                status="FAILED",
+                reason="Application startup verification failed: missing or invalid PID in metadata",
+                recovery_required=False,
+                retry_allowed=False,
+                reason_code=ReasonCode.UNKNOWN,
+            )
+
+        if is_alive is None:
+            is_alive = meta.get("process_alive")
+        if is_alive is None:
+            is_alive = is_pid_alive(pid)
+
+        if not is_alive:
+            return VerificationResult(
+                verified=False,
+                status="FAILED",
+                reason=f"Application startup verification failed: process with PID {pid} is not running",
+                recovery_required=True,
+                recovery_action=None,
+                retry_allowed=True,
+                failure_type="PROCESS_EXITED",
+                reason_code=ReasonCode.PROCESS_EXITED,
+            )
+
+        return VerificationResult(
+            verified=True,
+            status="VERIFIED",
+            reason=f"Application startup verified: process running (PID: {pid})",
+            recovery_required=False,
+            reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+        )
+
+    def verify_http_service(
+        self,
+        execution_result: ExecutionResult,
+        metadata: Optional[Dict[str, Any]] = None,
+        pid: Optional[int] = None,
+        is_alive: Optional[bool] = None,
+        command: str = "",
+        combined_lower: str = "",
+    ) -> VerificationResult:
+        """Verifies HTTP service (FastAPI, Flask, Express, Next.js). Process MUST remain alive and port listening."""
+        meta = metadata or {}
+        if any(p in combined_lower for p in ["address already in use", "port already in use", "eaddrinuse", "errno 10048", "errno 98"]):
+            return VerificationResult(
+                verified=False,
+                status="FAILED",
+                reason="Port conflict detected during application start",
+                recovery_required=True,
+                recovery_action=None,
+                retry_allowed=True,
+                failure_type="PORT_ERROR",
+                reason_code=ReasonCode.PORT_CONFLICT,
+            )
+
+        if pid is None:
+            pid = meta.get("pid")
+        if not pid or not isinstance(pid, int) or pid <= 0:
+            return VerificationResult(
+                verified=False,
+                status="FAILED",
+                reason="Application startup verification failed: missing or invalid PID in metadata",
+                recovery_required=False,
+                retry_allowed=False,
+                reason_code=ReasonCode.UNKNOWN,
+            )
+
+        if is_alive is None:
+            is_alive = meta.get("process_alive")
+        if is_alive is None:
+            is_alive = is_pid_alive(pid)
+
+        if not is_alive:
+            return VerificationResult(
+                verified=False,
+                status="FAILED",
+                reason=f"Application startup verification failed: process with PID {pid} is not running",
+                recovery_required=True,
+                recovery_action=None,
+                retry_allowed=True,
+                failure_type="PROCESS_EXITED",
+                reason_code=ReasonCode.PROCESS_EXITED,
+            )
+
+        port = meta.get("port")
+        if not port:
+            port_match = re.search(r"(?:--port|-p|\bPORT=)\s*(\d+)", command)
+            if port_match:
+                port = int(port_match.group(1))
+            else:
+                port_match2 = re.search(r":(\d{4,5})", command)
+                if port_match2:
+                    port = int(port_match2.group(1))
+
+        port_listening = meta.get("port_listening")
+        if port_listening is None and port:
+            port_listening = is_port_in_use(port)
+
+        if port and port_listening is False:
+            return VerificationResult(
+                verified=False,
+                status="FAILED",
+                reason=f"HTTP service started (PID {pid}) but port {port} is not listening",
+                recovery_required=True,
+                recovery_action=None,
+                retry_allowed=True,
+                failure_type="SERVICE_NOT_LISTENING",
+                reason_code=ReasonCode.SERVICE_NOT_LISTENING,
+            )
+
+        port_msg = f" and listening on port {port}" if port else ""
+        return VerificationResult(
+            verified=True,
+            status="VERIFIED",
+            reason=f"HTTP service startup verified: process running (PID: {pid}){port_msg}",
+            recovery_required=False,
+            reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+        )
+
     def _evaluate(self, execution_result: ExecutionResult) -> VerificationResult:
         # ----------------------------------------------------
         # A. Structural Evidence Integrity Checks
@@ -398,6 +582,21 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     failure_type="NETWORK_ERROR" if "http" in command else "TEST_FAILURE",
                     reason_code=ReasonCode.HEALTH_CHECK_FAILED if "http" in command else ReasonCode.EXIT_NONZERO,
                 )
+            elif step_type == StepType.START_APPLICATION.value:
+                exec_mode = getattr(execution_result, "execution_mode", None) or metadata.get("execution_mode")
+                if not exec_mode and execution_result.command:
+                    exec_mode = classify_execution_mode(workspace_dir=execution_result.workspace, command=execution_result.command).value
+                if exec_mode in (ExecutionMode.LONG_RUNNING.value, ExecutionMode.HTTP_SERVICE.value) or metadata.get("process_alive") is False:
+                    return VerificationResult(
+                        verified=False,
+                        status="FAILED",
+                        reason=f"Application startup verification failed: process exited with code {execution_result.exit_code}: {stderr[:150].strip() or stdout[:150].strip() or 'Process exited'}",
+                        recovery_required=True,
+                        recovery_action=None,
+                        retry_allowed=True,
+                        failure_type="PROCESS_EXITED",
+                        reason_code=ReasonCode.PROCESS_EXITED,
+                    )
 
             return VerificationResult(
                 verified=False,
@@ -632,41 +831,56 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action=None,
                     retry_allowed=True,
                     failure_type="PORT_ERROR",
-                
-            reason_code=ReasonCode.PORT_CONFLICT,)
+                    reason_code=ReasonCode.PORT_CONFLICT,
+                )
+
+            exec_mode = getattr(execution_result, "execution_mode", None) or metadata.get("execution_mode")
+            has_pid = "pid" in metadata
+            is_explicitly_short_lived = (
+                exec_mode == ExecutionMode.SHORT_LIVED.value
+                or metadata.get("execution_mode") == ExecutionMode.SHORT_LIVED.value
+                or metadata.get("process_persistence_required") is False
+            )
+
+            # If not explicitly marked short-lived, check command heuristics ONLY if no PID was provided and command is a specific script invocation
+            if not is_explicitly_short_lived and not has_pid and execution_result.command and execution_result.command not in ("test", "custom", ""):
+                classified = classify_execution_mode(
+                    workspace_dir=execution_result.workspace,
+                    command=execution_result.command,
+                    step_name=execution_result.step,
+                )
+                if classified == ExecutionMode.SHORT_LIVED:
+                    is_explicitly_short_lived = True
+
+            # If explicitly short-lived AND not claiming a background PID:
+            if is_explicitly_short_lived and not has_pid:
+                return self.verify_short_lived_execution(
+                    execution_result=execution_result,
+                    metadata=metadata,
+                    stdout=stdout,
+                    stderr=stderr,
+                    combined_lower=combined_lower,
+                )
+
             pid = metadata.get("pid")
-            if not pid or not isinstance(pid, int) or pid <= 0:
-                return VerificationResult(
-                    verified=False,
-                    status="FAILED",
-                    reason="Application startup verification failed: missing or invalid PID in metadata",
-                    recovery_required=False,
-                    retry_allowed=False,
-                    reason_code=ReasonCode.UNKNOWN,
-                )
-
             is_alive = metadata.get("process_alive")
-            if is_alive is None:
-                is_alive = is_pid_alive(pid)
 
-            if not is_alive:
-                return VerificationResult(
-                    verified=False,
-                    status="FAILED",
-                    reason=f"Application startup verification failed: process with PID {pid} is not running",
-                    recovery_required=True,
-                    recovery_action=None,
-                    retry_allowed=True,
-                    failure_type="PROCESS_EXITED",
-                    reason_code=ReasonCode.UNKNOWN,
+            if exec_mode == ExecutionMode.HTTP_SERVICE.value:
+                return self.verify_http_service(
+                    execution_result=execution_result,
+                    metadata=metadata,
+                    pid=pid,
+                    is_alive=is_alive,
+                    command=command,
+                    combined_lower=combined_lower,
                 )
 
-            return VerificationResult(
-                verified=True,
-                status="VERIFIED",
-                reason=f"Application startup verified: process running (PID: {pid})",
-                recovery_required=False,
-                reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+            # ExecutionMode.LONG_RUNNING or unclassified fallback (requires PID)
+            return self.verify_long_running_process(
+                execution_result=execution_result,
+                metadata=metadata,
+                pid=pid,
+                is_alive=is_alive,
             )
 
         # 6. CLONE_REPOSITORY

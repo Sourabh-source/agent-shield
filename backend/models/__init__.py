@@ -1,4 +1,5 @@
 from .workflow import (
+    ExecutionMode,
     WorkflowStatus,
     StepStatus,
     StepType,
@@ -22,6 +23,7 @@ from .workflow import (
 )
 
 __all__ = [
+    "ExecutionMode",
     "WorkflowStatus",
     "StepStatus",
     "StepType",

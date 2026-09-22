@@ -21,6 +21,12 @@ def compute_evidence_digest(stdout: str = "", stderr: str = "", exit_code: int =
     return hasher.hexdigest()
 
 
+class ExecutionMode(str, Enum):
+    SHORT_LIVED = "SHORT_LIVED"
+    LONG_RUNNING = "LONG_RUNNING"
+    HTTP_SERVICE = "HTTP_SERVICE"
+
+
 class WorkflowStatus(str, Enum):
     PENDING = "PENDING"
     PLANNING = "PLANNING"
@@ -123,6 +129,8 @@ class FailureType(str, Enum):
     IMPORT_ERROR = "IMPORT_ERROR"
     RUNTIME_FAILURE = "RUNTIME_FAILURE"
     HEALTH_CHECK_FAILURE = "HEALTH_CHECK_FAILURE"
+    PROCESS_EXITED = "PROCESS_EXITED"
+    SERVICE_NOT_LISTENING = "SERVICE_NOT_LISTENING"
     UNKNOWN_ERROR = "UNKNOWN_ERROR"
 
 
@@ -222,6 +230,7 @@ class ExecutionResult(BaseModel):
     evidence_digest: Optional[str] = None
     step_type: Optional[str] = None
     timeout_seconds: Optional[int] = None
+    execution_mode: Optional[str] = None
 
     def model_post_init(self, __context: Any) -> None:
         if not self.action:
@@ -343,6 +352,7 @@ class ProjectManifest(BaseModel):
     compile_command: Optional[str] = None
     import_check_command: Optional[str] = None
     smoke_test_command: Optional[str] = None
+    execution_mode: str = "SHORT_LIVED"
     detected_files: List[str] = Field(default_factory=list)
     details: Optional[Dict[str, Any]] = None
 
@@ -373,6 +383,7 @@ class StepDefinition(BaseModel):
     evidence: Optional[EvidenceRecord] = None
     evidence_digest: Optional[str] = None
     timeout_seconds: Optional[int] = None
+    execution_mode: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 

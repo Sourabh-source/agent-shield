@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from backend.models.workflow import ProjectManifest, ProjectAnalysis
+from backend.models.workflow import ProjectManifest, ProjectAnalysis, ExecutionMode
 
 
 IGNORE_DIRS = frozenset({
@@ -23,6 +23,99 @@ ML_LIBRARIES = HEAVY_ML_LIBRARIES | frozenset({
     "scikit-learn", "sklearn", "pandas", "numpy", "scipy",
     "matplotlib", "seaborn", "xgboost", "lightgbm", "statsmodels",
 })
+
+
+def classify_execution_mode(
+    workspace_dir: Optional[str] = None,
+    command: Optional[str] = None,
+    manifest: Optional[ProjectManifest] = None,
+    step_name: Optional[str] = None,
+) -> ExecutionMode:
+    """
+    Classifies the execution mode (SHORT_LIVED, LONG_RUNNING, HTTP_SERVICE)
+    based on command heuristics, step name, project manifest, or workspace file inspection.
+    """
+    cmd = (command or "").strip().lower()
+    s_name = (step_name or "").strip().lower()
+
+    # Step name explicit hints
+    if any(k in s_name for k in ["long-running", "long_running", "daemon", "worker", "background"]):
+        return ExecutionMode.LONG_RUNNING
+    if any(k in s_name for k in ["http", "api", "web service"]):
+        return ExecutionMode.HTTP_SERVICE
+
+    # 1. Obvious test/build/compile/notebook/CLI help commands are ALWAYS SHORT_LIVED
+    if any(cmd.startswith(p) for p in ["pytest", "python -m unittest", "ctest", "mvn test", "npm test", "yarn test", "pnpm test"]):
+        return ExecutionMode.SHORT_LIVED
+    if any(cmd.startswith(p) for p in ["npm run build", "yarn build", "pnpm build", "mvn compile", "make", "cmake", "python -m compileall"]):
+        return ExecutionMode.SHORT_LIVED
+    if "--help" in cmd or "-h" in cmd:
+        return ExecutionMode.SHORT_LIVED
+
+    # 2. Obvious HTTP server command patterns
+    http_cmd_patterns = [
+        "uvicorn",
+        "gunicorn",
+        "flask run",
+        "runserver",
+        "next dev",
+        "next start",
+        "catalina",
+    ]
+    if any(p in cmd for p in http_cmd_patterns):
+        return ExecutionMode.HTTP_SERVICE
+
+    # 3. Obvious worker / daemon command patterns
+    long_running_patterns = [
+        "celery worker",
+        "celery -a",
+        "rq worker",
+        "daemon",
+        "_srv.py",
+        "sleep_srv",
+    ]
+    if any(p in cmd for p in long_running_patterns):
+        return ExecutionMode.LONG_RUNNING
+
+    # 4. If manifest is provided, leverage manifest properties
+    if manifest:
+        if manifest.execution_mode:
+            try:
+                return ExecutionMode(manifest.execution_mode)
+            except ValueError:
+                pass
+        if manifest.is_api:
+            return ExecutionMode.HTTP_SERVICE
+
+    # 5. Inspect target script in workspace_dir if command runs a script
+    if workspace_dir and Path(workspace_dir).is_dir():
+        ws = Path(workspace_dir)
+        target_path = None
+        py_match = re.search(r"(?:python(?:3)?|node)\s+([^\s]+\.(?:py|js|ts))", command or "")
+        if py_match:
+            cand = ws / py_match.group(1)
+            if cand.is_file():
+                target_path = cand
+        elif manifest and manifest.entrypoints:
+            cand = ws / manifest.entrypoints[0]
+            if cand.is_file():
+                target_path = cand
+
+        if target_path and target_path.is_file():
+            try:
+                if "_srv" in target_path.name or "server" in target_path.name:
+                    return ExecutionMode.LONG_RUNNING
+                content = target_path.read_text(encoding="utf-8", errors="ignore")
+                if re.search(r"(app\.run\s*\(|uvicorn\.run\s*\(|\.listen\s*\(|serve_forever\s*\(|FastAPI\s*\(|Flask\s*\()", content):
+                    return ExecutionMode.HTTP_SERVICE
+                if "time.sleep(" in content:
+                    return ExecutionMode.LONG_RUNNING
+                if re.search(r"(while\s+True:|while\s+1:|consumer\.poll|get_message)", content) and any(k in content for k in ["queue", "kafka", "redis", "consumer", "celery"]):
+                    return ExecutionMode.LONG_RUNNING
+            except Exception:
+                pass
+
+    return ExecutionMode.SHORT_LIVED
 
 
 def _scan_files(workspace: Path, max_depth: int = 4) -> List[Path]:
@@ -163,6 +256,10 @@ def analyze_workspace(workspace_dir: str) -> ProjectManifest:
             manifest.start_command = "node index.js"
             manifest.application_startup_commands.append("node index.js")
 
+        if manifest.is_api:
+            manifest.execution_mode = ExecutionMode.HTTP_SERVICE.value
+        else:
+            manifest.execution_mode = ExecutionMode.SHORT_LIVED.value
         manifest.health_check_url = "http://localhost:3000"
         manifest.likely_health_endpoints = ["http://localhost:3000", "http://localhost:3000/api/health"]
         return manifest
@@ -275,6 +372,7 @@ def analyze_workspace(workspace_dir: str) -> ProjectManifest:
         if is_fastapi:
             manifest.framework = "fastapi"
             manifest.is_api = True
+            manifest.execution_mode = ExecutionMode.HTTP_SERVICE.value
             primary_ep = entrypoints[0] if entrypoints else "main.py"
             # Format uvicorn module target: app/main.py -> app.main:app
             mod_target = primary_ep.replace("/", ".").replace("\\", ".")
@@ -291,19 +389,51 @@ def analyze_workspace(workspace_dir: str) -> ProjectManifest:
             manifest.http_endpoints = ["/health", "/docs", "/openapi.json", "/"]
         elif is_flask:
             manifest.framework = "flask"
-            manifest.is_api = True
             primary_ep = entrypoints[0] if entrypoints else "app.py"
-            manifest.start_command = f"python {primary_ep}"
-            manifest.application_startup_commands.append(manifest.start_command)
-            manifest.health_check_url = "http://localhost:8000/health"
-            manifest.likely_health_endpoints = [
-                "http://localhost:8000/health",
-                "http://localhost:8000/",
-            ]
+            # Inspect primary_ep to see if it actually starts a server
+            ep_file = workspace / primary_ep
+            ep_has_server = False
+            if ep_file.exists():
+                try:
+                    ep_text = ep_file.read_text(encoding="utf-8", errors="ignore")
+                    ep_has_server = bool(re.search(r"(app\.run\s*\(|server\.run\s*\(|\brun\s*\(|Flask\s*\()", ep_text))
+                except Exception:
+                    pass
+            if ep_has_server or "flask run" in (manifest.start_command or ""):
+                manifest.is_api = True
+                manifest.execution_mode = ExecutionMode.HTTP_SERVICE.value
+                manifest.start_command = f"python {primary_ep}"
+                manifest.application_startup_commands.append(manifest.start_command)
+                manifest.health_check_url = "http://localhost:8000/health"
+                manifest.likely_health_endpoints = [
+                    "http://localhost:8000/health",
+                    "http://localhost:8000/",
+                ]
+            else:
+                manifest.execution_mode = ExecutionMode.SHORT_LIVED.value
+                manifest.start_command = f"python {primary_ep}"
+                manifest.application_startup_commands.append(manifest.start_command)
         elif entrypoints and not manifest.is_notebook:
             primary_ep = entrypoints[0]
             manifest.start_command = f"python {primary_ep}"
             manifest.application_startup_commands.append(manifest.start_command)
+            ep_file = workspace / primary_ep
+            if ep_file.exists():
+                try:
+                    ep_text = ep_file.read_text(encoding="utf-8", errors="ignore")
+                    if re.search(r"(app\.run\s*\(|uvicorn\.run\s*\(|\.listen\s*\(|serve_forever\s*\(|FastAPI\s*\(|Flask\s*\()", ep_text):
+                        manifest.execution_mode = ExecutionMode.HTTP_SERVICE.value
+                        manifest.is_api = True
+                    elif re.search(r"(while\s+True:|while\s+1:|consumer\.poll|get_message)", ep_text) and any(k in ep_text for k in ["queue", "kafka", "redis", "consumer", "celery"]):
+                        manifest.execution_mode = ExecutionMode.LONG_RUNNING.value
+                    else:
+                        manifest.execution_mode = ExecutionMode.SHORT_LIVED.value
+                except Exception:
+                    manifest.execution_mode = ExecutionMode.SHORT_LIVED.value
+            else:
+                manifest.execution_mode = ExecutionMode.SHORT_LIVED.value
+        else:
+            manifest.execution_mode = ExecutionMode.SHORT_LIVED.value
 
         # CLI detection
         if any(cli_lib in combined_deps for cli_lib in ("click", "typer", "argparse")):

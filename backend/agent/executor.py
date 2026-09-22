@@ -7,6 +7,7 @@ from typing import Dict, Optional
 
 from backend.config import settings
 from backend.models.workflow import (
+    ExecutionMode,
     ExecutionResult,
     ProjectAnalysis,
     StepDefinition,
@@ -148,9 +149,43 @@ class ToolExecutor:
                     metadata={"security_blocked": True},
                 )
 
+            # Execution Mode Determination
+            exec_mode_str = getattr(step, "execution_mode", None)
+            if not exec_mode_str:
+                from backend.tools.project_analyzer import classify_execution_mode
+                mode_enum = classify_execution_mode(
+                    workspace_dir=self.workspace_dir,
+                    command=cmd,
+                    step_name=step.name,
+                )
+                exec_mode_str = mode_enum.value
+
+            # If SHORT_LIVED: execute synchronously to completion!
+            if exec_mode_str == ExecutionMode.SHORT_LIVED.value:
+                tool = tool_registry.get(step.tool or "python") or tool_registry.get("shell")
+                res = tool.execute(
+                    command=cmd,
+                    cwd=self.workspace_dir,
+                    timeout_seconds=step.timeout_seconds or 120,
+                    workflow_id=self.workflow_id,
+                    step_name=step.name,
+                    step_id=step.id,
+                )
+                res.step_type = step_type
+                res.execution_mode = exec_mode_str
+                meta = res.metadata or {}
+                meta["execution_mode"] = exec_mode_str
+                meta["process_persistence_required"] = False
+                res.metadata = meta
+                return res
+
+            # If LONG_RUNNING or HTTP_SERVICE: launch in background
             start_time = time.perf_counter()
             try:
+                import re
                 import sys
+                from backend.tools.port_utils import is_port_in_use
+
                 argv = list(parsed_cmds[0]) if parsed_cmds else [cmd]
                 if argv[0].lower() in ("python", "python3") and not Path(argv[0]).is_absolute():
                     argv[0] = sys.executable
@@ -176,7 +211,8 @@ class ToolExecutor:
                 poll = self.background_process.poll()
                 duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
-                if poll is not None and poll != 0:
+                if poll is not None:
+                    # Process exited prematurely (even if code 0, long-running/HTTP service should not exit!)
                     out, err = self.background_process.communicate()
                     return ExecutionResult(
                         workflow_id=self.workflow_id,
@@ -185,10 +221,40 @@ class ToolExecutor:
                         command=cmd,
                         exit_code=poll,
                         stdout=out or "",
-                        stderr=err or "Application terminated immediately.",
+                        stderr=err or f"Application process exited prematurely with code {poll}",
                         duration_ms=duration_ms,
                         workspace=self.workspace_dir,
+                        step_type=step_type,
+                        execution_mode=exec_mode_str,
+                        metadata={
+                            "pid": self.background_process.pid,
+                            "process_alive": False,
+                            "execution_mode": exec_mode_str,
+                            "process_persistence_required": True,
+                        },
                     )
+
+                # Process is still running alive
+                port = None
+                port_match = re.search(r"(?:--port|-p|\bPORT=)\s*(\d+)", cmd)
+                if port_match:
+                    port = int(port_match.group(1))
+                else:
+                    port_match2 = re.search(r":(\d{4,5})", cmd)
+                    if port_match2:
+                        port = int(port_match2.group(1))
+                if not port and exec_mode_str == ExecutionMode.HTTP_SERVICE.value:
+                    port = 3000 if any(k in cmd for k in ["node", "next", "npm"]) else 8000
+
+                meta = {
+                    "pid": self.background_process.pid,
+                    "process_alive": True,
+                    "execution_mode": exec_mode_str,
+                    "process_persistence_required": True,
+                }
+                if port:
+                    meta["port"] = port
+                    meta["port_listening"] = is_port_in_use(port)
 
                 return ExecutionResult(
                     workflow_id=self.workflow_id,
@@ -200,7 +266,9 @@ class ToolExecutor:
                     stderr="",
                     duration_ms=duration_ms,
                     workspace=self.workspace_dir,
-                    metadata={"pid": self.background_process.pid},
+                    step_type=step_type,
+                    execution_mode=exec_mode_str,
+                    metadata=meta,
                 )
             except Exception as exc:
                 duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
@@ -214,6 +282,9 @@ class ToolExecutor:
                     stderr=f"Failed to start application: {str(exc)}",
                     duration_ms=duration_ms,
                     workspace=self.workspace_dir,
+                    step_type=step_type,
+                    execution_mode=exec_mode_str,
+                    metadata={"execution_mode": exec_mode_str},
                 )
 
         elif step_type == StepType.COMPILE_PROJECT.value:

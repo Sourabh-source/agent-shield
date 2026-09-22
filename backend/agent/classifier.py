@@ -65,7 +65,26 @@ def classify_failure(exec_result: ExecutionResult) -> FailureClassification:
             source_evidence="ModuleNotFoundError/ImportError",
         )
 
-    # 3. Port in use
+    # 3. Process Exited & Service Not Listening
+    if (("process with pid" in combined.lower() and "not running" in combined.lower()) or
+        (exec_result.metadata and exec_result.metadata.get("process_alive") is False)):
+        return FailureClassification(
+            failure_type=FailureType.PROCESS_EXITED,
+            reason="Background process terminated unexpectedly or exited prematurely",
+            confidence=0.96,
+            source_evidence="process not running",
+        )
+
+    if ("not listening" in combined.lower() or
+        (exec_result.metadata and exec_result.metadata.get("port_listening") is False)):
+        return FailureClassification(
+            failure_type=FailureType.SERVICE_NOT_LISTENING,
+            reason="Service process is running but port is not listening",
+            confidence=0.96,
+            source_evidence="service not listening",
+        )
+
+    # 4. Port in use
     port_conflict_match = re.search(r"(EADDRINUSE|Address already in use|Errno 10048|Errno 98)", combined, re.IGNORECASE)
     if port_conflict_match:
         port_match = re.search(r":(\d{2,5})", combined)
