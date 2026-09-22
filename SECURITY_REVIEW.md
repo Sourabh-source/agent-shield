@@ -23,17 +23,18 @@ Over an exhaustive, test-driven 9-phase hardening process, **AgentGuard has been
 
 ## 2. Threat Model & Attack Vectors
 
-| Attack Vector | Attacker Objective | Previous Vulnerability | Hardened Defense | Status |
+| Attack Vector | Attacker Objective | Hardened Defense | Status | Test Citation |
 | :--- | :--- | :--- | :--- | :--- |
-| **Command Injection** | Remote Code Execution on server | `shell=True` in `ShellTool`, `GitTool`, `ToolExecutor` | Strict `shell=False`, argument vectors, executable allowlist, shell metacharacter rejection | **MITIGATED** |
-| **Path Traversal** | Overwrite system files / read host data | Incomplete string checks swallowed in `try/except` | Strict `Path.resolve().relative_to()`, directory containment without exception swallowing | **MITIGATED** |
-| **SSRF / Metadata Theft** | Access AWS/GCP/Azure instance metadata or private networks | Unvalidated repo URL passed to git clone | Strict URL validator: HTTP/HTTPS only, blocked AWS `169.254.169.254`, blocked private IP blocks (`10.0.0.0/8`, `192.168.0.0/16`, `172.16.0.0/12`), blocked `ext::`, `file://`, `ssh://` | **MITIGATED** |
-| **Denial of Service** | Resource exhaustion (CPU/Disk/RAM/Time) | Unbounded execution time and output buffers | `MAX_WORKFLOW_TIME` (300s budget), `MAX_OUTPUT_SIZE` (1MB limit), `MAX_RECOVERY_ACTIONS` (5 limit), process group termination | **MITIGATED** |
-| **Tenant Enumeration & Bypass** | Read or modify other users' workflows | No authentication, no tenant scoping in SQLite | `AuthMiddleware` with API key mapping, tenant scoping on all queries, uniform 404 anti-enumeration | **MITIGATED** |
-| **Forged Verification** | Fake successful status via unauthorized callback | `/verify` accepted unauthenticated requests | HMAC-SHA256 signature enforcement on `/verify` via `X-AgentGuard-Verify-Signature` | **MITIGATED** |
-| **Verification False Positives** | Mark broken builds as verified success | Substring searching on `step_name` instead of typed enum; zero-test suites passed | Enum-based dispatch (`StepType`), 0-test collection detection, golden corpus error detectors | **MITIGATED** |
-| **Directory Name Poisoning** | Trick self-healing into skipping remediation | `is_action_already_satisfied` crawled workspace with `rglob` | Verification restricted strictly to `node_modules` or `site-packages`, plus real postcondition checks | **MITIGATED** |
-| **Credential Leakage** | Exfiltrate tokens/passwords via API/logs | Raw subprocess output stored and logged in plaintext | Automated multi-pattern `redact_secrets` in output truncation, error logging, and `JsonFormatter` | **MITIGATED** |
+| **Command Injection** | Remote Code Execution on server | Strict `shell=False`, argument vectors, executable allowlist (powershell/taskkill removed), `python -c` banned | **MITIGATED** | `tests/test_python_c_vector.py` |
+| **Path Traversal / Symlink Escape** | Overwrite system files / read host data | `check_path_containment` with `os.path.realpath` traversal up to workspace root; `cat` path verification | **MITIGATED** | `tests/test_phase10_sandbox_escape.py` |
+| **SSRF / IP Encoding Bypass** | Access cloud metadata or private networks | IP parser resolving decimal, octal, hex representations, pre-clone DNS TOCTOU resolution check | **MITIGATED** | `tests/test_ssrf_encodings.py` |
+| **Denial of Service** | Resource exhaustion (CPU/Disk/RAM/Time) | `MAX_WORKFLOW_TIME` (300s budget), `MAX_OUTPUT_SIZE` (1MB limit), `MAX_RECOVERY_ACTIONS` (5 limit), process group termination | **MITIGATED** | `tests/test_phase10_fuzz.py` |
+| **Tenant Enumeration & Auth Bypass** | Read or modify other users' workflows | `AuthMiddleware` with API key mapping, tenant scoping on all queries, uniform 404 anti-enumeration | **MITIGATED** | `tests/test_phase3_auth.py` |
+| **Forged Verification & Replay** | Fake successful status via unauthorized callback | Mandatory HMAC-SHA256 signatures, 60s timestamp skew, single-use nonce cache, no fallback secrets | **MITIGATED** | `tests/test_verify_hardening.py` |
+| **Verification False Positives** | Mark broken builds as verified success | Enum dispatch (`StepType`), 0-test collection check, fatal error string checks, PID liveness check, status_code validation | **MITIGATED** | `tests/test_verifier_false_positives.py` |
+| **Directory Name Poisoning** | Trick self-healing into skipping remediation | Verification restricted strictly to `node_modules` or `site-packages`, plus real postcondition checks | **MITIGATED** | `tests/test_phase5_self_healing.py` |
+| **Credential Leakage** | Exfiltrate tokens/passwords via API/logs | 25+ real-world secret pattern maskers (`redact_secrets`) with zero false positives on safe logs | **MITIGATED** | `tests/test_redaction_corpus.py` |
+| **Sandbox Isolation & Fail-Closed** | Escape host or run without isolation | Container sandbox with `--network=none`, `--read-only`, `--cap-drop=ALL`; returns `SANDBOX_UNAVAILABLE` when daemon absent | **MITIGATED** | `tests/test_sandbox.py` |
 
 ---
 

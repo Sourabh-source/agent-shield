@@ -36,23 +36,60 @@ class TestFilesystemEscape:
         assert "escapes workspace" in result.stderr or "No such file" in result.stderr
 
     def test_symlink_escape(self, tmp_path):
-        # Attempt to read through a symlink pointing outside
-        symlink_path = tmp_path / "outside"
+        # Create an actual secret file OUTSIDE the workspace
+        outside_dir = tmp_path.parent / f"outside_secret_{tmp_path.name}"
+        outside_dir.mkdir(parents=True, exist_ok=True)
+        secret_file = outside_dir / "secret.txt"
+        secret_file.write_text("SUPER_SECRET_HOST_DATA")
+
+        # Create symlink/junction inside the workspace pointing to outside_dir
+        symlink_path = tmp_path / "outside_link"
         try:
             if os.name == "nt":
                 import _winapi
-                _winapi.CreateJunction(str(Path("C:\\Windows").resolve()), str(symlink_path))
+                _winapi.CreateJunction(str(outside_dir.resolve()), str(symlink_path))
             else:
-                os.symlink("/etc", str(symlink_path))
+                os.symlink(str(outside_dir.resolve()), str(symlink_path))
         except OSError:
             pytest.skip("Symlink creation not permitted")
 
         result = execute_shell_command(
-            command="cat outside/passwd",
+            command="cat outside_link/secret.txt",
+            cwd=str(tmp_path)
+        )
+        assert result.exit_code != 0, f"SECURITY FAILURE: read host secret through symlink: {result.stdout}"
+        assert "escapes workspace" in result.stderr.lower() or "security violation" in result.stderr.lower(), (
+            f"SECURITY FAILURE: expected containment error, got: {result.stderr}"
+        )
+        assert "SUPER_SECRET_HOST_DATA" not in result.stdout
+
+    def test_symlink_chain_escape(self, tmp_path):
+        # Symlink chain: linkA -> linkB -> outside
+        outside_dir = tmp_path.parent / f"outside_chain_{tmp_path.name}"
+        outside_dir.mkdir(parents=True, exist_ok=True)
+        secret_file = outside_dir / "chain_secret.txt"
+        secret_file.write_text("CHAIN_SECRET_HOST_DATA")
+
+        link_b = tmp_path / "link_b"
+        link_a = tmp_path / "link_a"
+        try:
+            if os.name == "nt":
+                import _winapi
+                _winapi.CreateJunction(str(outside_dir.resolve()), str(link_b))
+                _winapi.CreateJunction(str(link_b.resolve()), str(link_a))
+            else:
+                os.symlink(str(outside_dir.resolve()), str(link_b))
+                os.symlink(str(link_b.resolve()), str(link_a))
+        except OSError:
+            pytest.skip("Symlink creation not permitted")
+
+        result = execute_shell_command(
+            command="cat link_a/chain_secret.txt",
             cwd=str(tmp_path)
         )
         assert result.exit_code != 0
-        assert "escapes workspace" in result.stderr or "No such file" in result.stderr
+        assert "escapes workspace" in result.stderr.lower() or "security violation" in result.stderr.lower()
+        assert "CHAIN_SECRET_HOST_DATA" not in result.stdout
 
     def test_null_byte_injection(self, tmp_path):
         # Null bytes in path
@@ -90,12 +127,14 @@ class TestCommandInjection:
         assert "not in the security allowlist" in result.stderr
 
     def test_flag_injection(self, tmp_path):
+        script = tmp_path / "test_flag.py"
+        script.write_text("print('flag ok')\n")
         result = execute_shell_command(
-            command="python -c 'print(1)' --malicious",
+            command="python test_flag.py --malicious-flag",
             cwd=str(tmp_path)
         )
-        # This is safe as long as python runs it safely, but checking we can pass args
-        assert result.exit_code == 0 or "forbidden" not in result.stderr
+        assert result.exit_code == 0
+        assert "flag ok" in result.stdout
 
     def test_case_sensitivity_bypass(self, tmp_path):
         result = execute_shell_command(
@@ -271,17 +310,21 @@ class TestAuthBypass:
 
 class TestResourceExhaustion:
     def test_huge_output(self, tmp_path):
-        # Generate huge output
+        # Generate huge output via a workspace script
+        huge_script = tmp_path / "huge.py"
+        huge_script.write_text("print('A' * 2_000_000)\n")
         result = execute_shell_command(
-            command="python -c 'print(\"A\" * 2_000_000)'",
+            command="python huge.py",
             cwd=str(tmp_path)
         )
         assert len(result.stdout) <= getattr(settings, "MAX_OUTPUT_SIZE", 1_000_000) + 100
         assert "TRUNCATED" in result.stdout
 
     def test_command_timeout(self, tmp_path):
+        sleep_script = tmp_path / "sleep.py"
+        sleep_script.write_text("import time; time.sleep(10)\n")
         result = execute_shell_command(
-            command="python -c 'import time; time.sleep(10)'",
+            command="python sleep.py",
             cwd=str(tmp_path),
             timeout_seconds=1
         )

@@ -31,6 +31,7 @@ from backend.models.workflow import (
     WorkflowStatus,
 )
 from backend.agent.orchestrator import WorkflowOrchestrator, workflow_store
+from tests.conftest import make_test_verify_headers
 
 client = TestClient(app, headers={"X-API-Key": "test-api-key"})
 
@@ -229,8 +230,10 @@ def test_fix3_callback_pass_marks_verified_and_continues():
     wf.current_step = 'compile'
     workflow_store.save(wf)
 
+    headers = make_test_verify_headers(wf.workflow_id, 's1', '')
     resp = client.post(
         f'/workflow/{wf.workflow_id}/verify',
+        headers=headers,
         json={
             'step_id': 's1',
             'verification_result': {
@@ -253,25 +256,28 @@ def test_fix3_callback_fail_with_recovery_triggers_recovery():
     orchestrator = WorkflowOrchestrator(verifier_client=MockVerifierClient(), max_retries=2)
     wf = orchestrator.create_workflow(repo_url='https://github.com/example/cb-heal', task='Callback heal test')
     wf.steps = [
-        StepDefinition(id='s1', type='shell_command', name='build', command='echo build succeeded', status=StepStatus.RUNNING),
+        StepDefinition(id='s1', type='shell_command', name='build', command='exit 0', status=StepStatus.RUNNING),
     ]
     wf.current_step = 'build'
     workflow_store.save(wf)
 
     # Verifier posts verification failure with recovery action
-    resp = client.post(
-        f'/workflow/{wf.workflow_id}/verify',
-        json={
-            'step_id': 's1',
-            'verification_result': {
-                'verified': False,
-                'reason': 'Missing dependency libfoo',
-                'recovery_required': True,
-                'recovery_action': 'echo installing libfoo',
-                'retry_allowed': True,
+    headers = make_test_verify_headers(wf.workflow_id, 's1', '')
+    with patch("backend.api.workflow.WorkflowOrchestrator", return_value=orchestrator):
+        resp = client.post(
+            f'/workflow/{wf.workflow_id}/verify',
+            headers=headers,
+            json={
+                'step_id': 's1',
+                'verification_result': {
+                    'verified': False,
+                    'reason': 'Missing dependency libfoo',
+                    'recovery_required': True,
+                    'recovery_action': 'echo installing libfoo',
+                    'retry_allowed': True,
+                }
             }
-        }
-    )
+        )
     assert resp.status_code == 200
     state = resp.json()
     assert state['retries'] == 1
@@ -302,8 +308,10 @@ def test_fix3_callback_retry_is_bounded():
     workflow_store.save(wf)
 
     with patch("backend.api.workflow.WorkflowOrchestrator", return_value=orchestrator):
+        headers = make_test_verify_headers(wf.workflow_id, 's1', '')
         resp = client.post(
             f'/workflow/{wf.workflow_id}/verify',
+            headers=headers,
             json={
                 'step_id': 's1',
                 'verification_result': {
@@ -332,8 +340,10 @@ def test_fix3_callback_failed_verification_never_produces_success():
     wf.current_step = 'security_check'
     workflow_store.save(wf)
 
+    headers = make_test_verify_headers(wf.workflow_id, 's1', '')
     resp = client.post(
         f'/workflow/{wf.workflow_id}/verify',
+        headers=headers,
         json={
             'step_id': 's1',
             'verification_result': {
@@ -361,8 +371,10 @@ def test_fix3_callback_retry_disallowed_produces_terminal_failure():
     wf.current_step = 'deploy'
     workflow_store.save(wf)
 
+    headers = make_test_verify_headers(wf.workflow_id, 's1', '')
     resp = client.post(
         f'/workflow/{wf.workflow_id}/verify',
+        headers=headers,
         json={
             'step_id': 's1',
             'verification_result': {
@@ -390,8 +402,10 @@ def test_fix3_callback_verifier_unavailable_produces_verification_unavailable():
     wf.current_step = 'build'
     workflow_store.save(wf)
 
+    headers = make_test_verify_headers(wf.workflow_id, 's1', '')
     resp = client.post(
         f'/workflow/{wf.workflow_id}/verify',
+        headers=headers,
         json={
             'step_id': 's1',
             'verification_result': {
@@ -434,8 +448,10 @@ def test_fix3_callback_successful_retry_requires_new_verification():
 
     # Initial external callback fails with recovery requested
     with patch("backend.api.workflow.WorkflowOrchestrator", return_value=orchestrator):
+        headers = make_test_verify_headers(wf.workflow_id, 's1', '')
         resp = client.post(
             f'/workflow/{wf.workflow_id}/verify',
+            headers=headers,
             json={
                 'step_id': 's1',
                 'verification_result': {

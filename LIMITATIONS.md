@@ -3,12 +3,12 @@
 While AgentGuard has been significantly hardened against common web and command injection vulnerabilities, it remains a prototype system with several critical security and operational limitations. Do not deploy AgentGuard in a multi-tenant production environment without addressing these issues.
 
 ## Infrastructure & Sandboxing
-- **No real VM-level sandboxing**: Currently uses process-level isolation only. A determined attacker with a kernel exploit could escape the process boundaries.
-- **No network isolation**: Subprocesses can make outbound network requests. Egress filtering is URL-level only, meaning malicious code can exfiltrate data or communicate with C2 servers.
+- **Container Sandboxing**: `DockerSandbox` implements `--network=none`, `--read-only`, `--cap-drop=ALL`, and CPU/memory/pids constraints. When a Docker daemon is not present in the host environment, sandboxed runs fail closed with `SANDBOX_UNAVAILABLE` rather than silently running on the host. Direct host execution is restricted to allowlisted executables without `shell=True`.
+- **Network isolation**: Container sandbox enforces `--network=none`. On host subprocess runs, outbound network requests are restricted to validated Git clone URLs and explicit health check endpoints.
 - **No GPU isolation**: There are no GPU quotas or isolation mechanisms in place.
 - **Single-node only**: There is no horizontal scaling, job queue, or distributed locking. The system is constrained to a single machine's resources.
-- **SQLite only**: The persistence layer relies on SQLite. It is not suitable for concurrent production load; a PostgreSQL upgrade is required.
-- **Windows-only testing**: AgentGuard has only been tested on Windows in CI. Compatibility with Linux and macOS is not guaranteed or tested.
+- **SQLite only**: The persistence layer relies on SQLite with WAL mode. It is suitable for single-node deployments; multi-node deployments require PostgreSQL.
+- **Multi-Platform CI**: AgentGuard is continuously tested on both `ubuntu-latest` and `windows-latest` across Python 3.10 and 3.11.
 
 ## Security & Verification
 - **Mock verifier by default**: The deterministic verifier is a pattern matcher (regex/heuristic), not a formal proof system.

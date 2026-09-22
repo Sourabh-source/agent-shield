@@ -32,11 +32,39 @@ BLOCKED_PATTERNS = [
 
 # Sensitive patterns to redact from logs/outputs
 SECRET_PATTERNS = [
-    (r"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*['\"]?([A-Za-z0-9_\-\.]{8,})['\"]?", r"\1=***REDACTED***"),
-    (r"(AIzaSy[A-Za-z0-9_-]{20,})", r"***REDACTED_GEMINI_KEY***"),
-    (r"(ghp_[A-Za-z0-9]{30,})", r"***REDACTED_GITHUB_TOKEN***"),
-    (r"(AKIA[0-9A-Z]{16})", r"***REDACTED_AWS_KEY***"),
-    (r"(Bearer\s+[A-Za-z0-9_\-\.]{20,})", r"Bearer ***REDACTED***"),
+    # PEM private key blocks (multi-line)
+    (r"-----BEGIN (?:[A-Z ]+)?PRIVATE KEY-----[\s\S]+?-----END (?:[A-Z ]+)?PRIVATE KEY-----", r"***REDACTED_PRIVATE_KEY***"),
+    # Embedded basic auth credentials in URLs: http(s)://user:password@host
+    (r"(://[^/\s:@]+:)([^/\s@]+)(@)", r"\g<1>***REDACTED***\g<3>"),
+    # Anthropic API keys (sk-ant-...)
+    (r"\bsk-ant-[A-Za-z0-9_-]{20,}\b", r"***REDACTED_ANTHROPIC_KEY***"),
+    # OpenAI modern project keys (sk-proj-...) and legacy keys (sk-...)
+    (r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b", r"***REDACTED_OPENAI_KEY***"),
+    # GitHub fine-grained PATs
+    (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", r"***REDACTED_GITHUB_TOKEN***"),
+    # GitHub classic / oauth / user / server / refresh tokens
+    (r"\bgh[opusr]_[A-Za-z0-9_]{20,}\b", r"***REDACTED_GITHUB_TOKEN***"),
+    # Slack bot/user/app tokens
+    (r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b", r"***REDACTED_SLACK_TOKEN***"),
+    (r"\bxapp-[A-Za-z0-9-]{10,}\b", r"***REDACTED_SLACK_TOKEN***"),
+    # Stripe live secret / restricted keys
+    (r"\b(?:sk|rk)_live_[A-Za-z0-9]{20,}\b", r"***REDACTED_STRIPE_KEY***"),
+    # Google AI Studio / Gemini / Cloud API keys
+    (r"\bAIza[A-Za-z0-9_-]{20,}\b", r"***REDACTED_GOOGLE_KEY***"),
+    # AWS Access Key ID
+    (r"\bAKIA[0-9A-Z]{16}\b", r"***REDACTED_AWS_KEY***"),
+    # AWS Secret Access Key in key-value context
+    (r"(?i)\b(aws_secret_access_key|aws_secret_key)\s*([:=])\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?", r"\g<1> \g<2> ***REDACTED_AWS_SECRET***"),
+    # JSON Web Token (JWT)
+    (r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", r"***REDACTED_JWT***"),
+    # URL query parameter tokens: ?token=..., &api_key=..., etc.
+    (r"(?i)([?&](?:api[_-]?key|auth[_-]?token|access[_-]?token|secret[_-]?key|token|password|secret)=)([^&\s]+)", r"\g<1>***REDACTED***"),
+    # JSON-formatted key-value tokens: {"auth_token": "secret_val"}
+    (r"""(?i)(["'](?:api[_-]?key|auth[_-]?token|access[_-]?token|secret[_-]?key|password|secret|credential)["']\s*:\s*["'])([^"']+)["']""", r"""\g<1>***REDACTED***\""""),
+    # Key-value assignment with '=' or ':': password = foo, api_key: 'xyz' (no 8-char min length!)
+    (r"(?i)\b(api[_-]?key|auth[_-]?token|access[_-]?token|secret[_-]?key|password|passwd|pwd|credential)\s*([:=])\s*['\"]?([^\s'\"]+)['\"]?", r"\g<1>\g<2>***REDACTED***"),
+    # Authorization: Bearer <token>
+    (r"(?i)\b(Bearer)\s+([A-Za-z0-9_.\-~+/=]{20,})\b", r"\g<1> ***REDACTED***"),
 ]
 
 # Allowlisted executables permitted for tool execution
@@ -44,7 +72,7 @@ ALLOWED_EXECUTABLES = frozenset({
     "git", "pip", "pip3", "python", "python3", "py",
     "node", "npm", "npx", "yarn", "pnpm",
     "pytest", "tsc", "eslint", "prettier",
-    "echo", "cat", "exit", "powershell", "taskkill",
+    "echo", "cat", "exit",
 })
 
 # Safe environment variables allowlist (never copy unverified host os.environ)
@@ -88,22 +116,56 @@ def truncate_output(text: str, max_size: int = MAX_OUTPUT_SIZE) -> str:
 
 def check_path_containment(candidate: "str | Path", workspace: "str | Path") -> Tuple[bool, Optional[str]]:
     """
-    Robust path containment check using resolved Path objects.
-    Verifies that candidate path resolves strictly inside workspace.
-    Uses candidate.resolve().relative_to(workspace.resolve()).
-    Handles Windows and Linux paths, mixed separators, and traversal.
+    Robust path containment check.
+    - Normalizes separators (\\ to /) to ensure consistent behavior across POSIX and Windows.
+    - Resolves all symlinks/junctions using os.path.realpath.
+    - Verifies that the resolved canonical path is strictly within the workspace root.
+    - Verifies all existing parent components to prevent symlink traversal to outside locations.
     """
     try:
-        ws_resolved = Path(workspace).resolve()
         cand_str = str(candidate).strip("\"'")
-        cand_path = Path(cand_str)
-        if not cand_path.is_absolute():
-            cand_resolved = (ws_resolved / cand_path).resolve()
-        else:
-            cand_resolved = cand_path.resolve()
+        if "\0" in cand_str:
+            return False, f"Null byte in path: '{candidate}'"
 
-        # candidate must be relative to workspace (or be the workspace itself)
-        cand_resolved.relative_to(ws_resolved)
+        # Cross-platform normalization: convert backslashes to forward slashes before parsing
+        cand_norm = cand_str.replace("\\", "/")
+
+        ws_real = Path(os.path.realpath(str(workspace))).resolve()
+
+        # Check traversal segments explicitly
+        parts = [p for p in cand_norm.split("/") if p]
+
+        # Determine if path is absolute
+        is_abs = os.path.isabs(cand_norm) or (os.name == "nt" and len(cand_norm) > 1 and cand_norm[1] == ":")
+
+        if is_abs:
+            cand_path = Path(cand_norm)
+        else:
+            cand_path = ws_real
+            for part in parts:
+                if part == "..":
+                    cand_path = cand_path.parent
+                elif part != ".":
+                    cand_path = cand_path / part
+
+        # Canonicalize resolving all symlinks
+        cand_real = Path(os.path.realpath(str(cand_path))).resolve()
+
+        # Check containment against workspace root
+        cand_real.relative_to(ws_real)
+
+        # Also inspect every existing ancestor of the candidate up to ws_real to catch intermediate symlinks
+        curr = cand_path
+        while curr != ws_real and curr != curr.parent:
+            try:
+                curr_str = str(curr)
+                if os.path.exists(curr_str) or os.path.islink(curr_str):
+                    resolved_curr = Path(os.path.realpath(curr_str)).resolve()
+                    resolved_curr.relative_to(ws_real)
+            except ValueError:
+                return False, f"Path traversal violation: '{candidate}' resolves via symlink outside workspace '{workspace}'"
+            curr = curr.parent
+
         return True, None
     except (ValueError, Exception) as exc:
         return False, f"Path traversal violation: '{candidate}' escapes workspace '{workspace}'"
@@ -162,6 +224,11 @@ def validate_and_parse_command(
         is_python_cmd = exe_stem in ("python", "python3", "py")
         is_git_clone = (exe_stem == "git" and len(tokens) > 1 and tokens[1] == "clone")
 
+        # Block inline Python execution via -c (Phase 2 requirement)
+        if is_python_cmd:
+            if "-c" in tokens or any(t == "-c" or t.startswith("-c") for t in tokens):
+                return False, "Inline Python execution via '-c' is forbidden. Write a script to the workspace instead.", []
+
         for i, token in enumerate(tokens):
             # Backtick command substitution
             if "`" in token:
@@ -175,41 +242,40 @@ def validate_and_parse_command(
             if token in (";", "|", "&", ">", "<", ">>", "2>", "2>&1", "<<", "<<<"):
                 return False, f"Shell operator forbidden: '{token}'", []
 
-            # Unquoted semicolon attached to token (e.g. 'hello;') outside python -c args
-            if ";" in token and not (is_python_cmd and i > 1):
+            # Unquoted semicolon attached to token (e.g. 'hello;')
+            if ";" in token:
                 return False, f"Semicolon command separator forbidden: '{token}'", []
 
             # Path containment check if cwd is provided
             if workspace_root and i > 0:
                 clean_tok = token.strip("\"'")
-                # Exclude python -c code or flags
-                if is_python_cmd and tokens[1] == "-c" and i >= 2:
-                    continue
                 # Exclude flags
                 if clean_tok.startswith("-"):
                     continue
                 # For git clone, intermediate repository URL is external
                 if is_git_clone and i < len(tokens) - 1:
                     continue
-                # Check tokens containing traversal ..
-                if ".." in clean_tok:
-                    contained, err = check_path_containment(clean_tok, workspace_root)
-                    if not contained:
-                        return False, err, []
-                # Check absolute paths
-                elif not (
+                # Exclude URLs
+                if (
                     clean_tok.startswith("http://")
                     or clean_tok.startswith("https://")
                     or clean_tok.startswith("git@")
                 ):
-                    try:
-                        p = Path(clean_tok)
-                        if p.is_absolute():
-                            contained, err = check_path_containment(p, workspace_root)
-                            if not contained:
-                                return False, err, []
-                    except Exception:
-                        pass
+                    continue
+
+                # Inspect any candidate path argument
+                cand_check = False
+                if any(c in clean_tok for c in ("/", "\\", "..")):
+                    cand_check = True
+                elif exe_stem in ("cat", "python", "python3", "py", "pytest") and not clean_tok.isdigit():
+                    cand_check = True
+                elif (workspace_root / clean_tok).exists() or os.path.islink(str(workspace_root / clean_tok)):
+                    cand_check = True
+
+                if cand_check:
+                    contained, err = check_path_containment(clean_tok, workspace_root)
+                    if not contained:
+                        return False, err, []
 
         parsed_commands.append(tokens)
 
@@ -313,10 +379,21 @@ def execute_shell_command(
         if exe_lower == "cat" and not shutil.which("cat"):
             # Minimal emulation for environments without cat (e.g. Windows)
             if len(tokens) > 1:
-                target_file = Path(resolved_cwd or ".") / tokens[1] if not Path(tokens[1]).is_absolute() else Path(tokens[1])
-                if target_file.exists() and target_file.is_file():
+                target_tok = tokens[1].strip("\"'")
+                contained, err = check_path_containment(target_tok, resolved_cwd or ".")
+                if not contained:
+                    accumulated_stderr.append(f"Security Violation: {err}\n")
+                    last_exit_code = 126
+                    break
+                target_real = Path(os.path.realpath(os.path.join(resolved_cwd or ".", target_tok)))
+                contained_real, err_real = check_path_containment(target_real, resolved_cwd or ".")
+                if not contained_real:
+                    accumulated_stderr.append(f"Security Violation: {err_real}\n")
+                    last_exit_code = 126
+                    break
+                if target_real.exists() and target_real.is_file():
                     try:
-                        content = target_file.read_text(encoding="utf-8", errors="replace")
+                        content = target_real.read_text(encoding="utf-8", errors="replace")
                         accumulated_stdout.append(content)
                         last_exit_code = 0
                     except Exception as e:

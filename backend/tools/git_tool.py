@@ -1,11 +1,13 @@
 import ipaddress
 import os
+import re
 import shutil
+import socket
 import subprocess
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 from backend.models.workflow import ExecutionResult, current_iso_time
 from backend.tools.base_tool import BaseTool
@@ -20,13 +22,97 @@ METADATA_HOSTS = frozenset({
 })
 
 
+def parse_potential_ip(hostname: str) -> Optional[Union[ipaddress.IPv4Address, ipaddress.IPv6Address]]:
+    """
+    Parses an IP address from standard or alternate numeric encodings:
+    - Standard dotted-quad: 127.0.0.1
+    - Decimal integer: 2852039166 (169.254.169.254) or 2130706433 (127.0.0.1)
+    - Hexadecimal integer: 0xa9fea9fe
+    - Octal integer: 017700000001
+    - Dotted octal: 0251.0376.0251.0376
+    - Dotted hex: 0x7f.0x0.0x0.0x1
+    - IPv6 literals: [::1]
+    """
+    clean_host = hostname.strip("[]")
+    try:
+        return ipaddress.ip_address(clean_host)
+    except ValueError:
+        pass
+
+    # Hex integer: 0xa9fea9fe
+    if re.match(r"^0x[0-9a-fA-F]+$", clean_host):
+        try:
+            val = int(clean_host, 16)
+            if 0 <= val <= 0xFFFFFFFF:
+                return ipaddress.IPv4Address(val)
+        except Exception:
+            pass
+
+    # Octal integer (single number): 017700000001
+    if re.match(r"^0[0-7]+$", clean_host):
+        try:
+            val = int(clean_host, 8)
+            if 0 <= val <= 0xFFFFFFFF:
+                return ipaddress.IPv4Address(val)
+        except Exception:
+            pass
+
+    # Decimal integer: 2852039166
+    if clean_host.isdigit():
+        try:
+            val = int(clean_host, 10)
+            if 0 <= val <= 0xFFFFFFFF:
+                return ipaddress.IPv4Address(val)
+        except Exception:
+            pass
+
+    # Dotted notation with octal/hex components: e.g. 0251.0376.0251.0376 or 0x7f.0x0.0x0.0x1
+    parts = clean_host.split(".")
+    if len(parts) == 4:
+        try:
+            octets = []
+            for p in parts:
+                if p.startswith("0x") or p.startswith("0X"):
+                    v = int(p, 16)
+                elif p.startswith("0") and len(p) > 1 and p.isdigit():
+                    v = int(p, 8)
+                elif p.isdigit():
+                    v = int(p, 10)
+                else:
+                    raise ValueError("Not a numeric octet")
+                if not (0 <= v <= 255):
+                    raise ValueError("Octet out of range")
+                octets.append(v)
+            return ipaddress.IPv4Address(bytes(octets))
+        except Exception:
+            pass
+
+    return None
+
+
+def check_ip_ssrf(ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> Tuple[bool, Optional[str]]:
+    """Checks whether an IP is private, loopback, link-local, reserved, multicast, or metadata."""
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or str(ip) == "169.254.169.254"
+        or str(ip) in METADATA_HOSTS
+    ):
+        return False, f"Access to private or reserved IP address '{ip}' is prohibited (SSRF prevention)."
+    return True, None
+
+
 def validate_repo_url(repo_url: str) -> Tuple[bool, Optional[str]]:
     """
     Strict validation of Git repository URLs:
     - Enforces https:// or http:// schemes (blocks ext::, file://, ssh://, git@, local filesystem paths)
     - Rejects flag injection (leading '-')
     - Rejects shell metacharacters and unquoted spaces
-    - Rejects cloud metadata hosts and private/loopback IP literals (SSRF prevention)
+    - Rejects cloud metadata hosts and private/loopback IP literals in all numeric encodings (SSRF prevention)
+    - Rejects hostnames that resolve to private/reserved IP addresses via DNS
     """
     if not repo_url or not repo_url.strip():
         return False, "Repository URL cannot be empty."
@@ -71,24 +157,42 @@ def validate_repo_url(repo_url: str) -> Tuple[bool, Optional[str]]:
             return False, f"Invalid local path '{url}'."
 
     if scheme not in ("https", "http"):
-        return False, f"Prohibited URL scheme '{scheme or 'none'}'. Only https:// and http:// repository URLs are permitted."
+        return False, f"Invalid repository URL: Prohibited URL scheme '{scheme or 'none'}'. Only https:// and http:// repository URLs are permitted."
 
     hostname = (parsed.hostname or "").lower()
     if not hostname:
-        return False, "Missing hostname in repository URL."
+        return False, "Invalid repository URL: Missing hostname in repository URL."
 
     # SSRF: block cloud metadata hosts
     if hostname in METADATA_HOSTS:
         return False, f"Access to cloud metadata host '{hostname}' is prohibited (SSRF prevention)."
 
-    # SSRF: block private, loopback, and link-local IP literals
-    try:
-        ip = ipaddress.ip_address(hostname)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            return False, f"Access to private or reserved IP address '{hostname}' is prohibited (SSRF prevention)."
-    except ValueError:
-        # Hostname is a regular domain name, not an IP literal
-        pass
+    # SSRF: check if hostname is an IP literal (decimal, octal, hex, dotted)
+    ip_obj = parse_potential_ip(hostname)
+    if ip_obj:
+        ok, err = check_ip_ssrf(ip_obj)
+        if not ok:
+            return False, err
+    else:
+        # SSRF: resolve hostname via DNS and verify none of the returned IPs are private
+        try:
+            addr_info = socket.getaddrinfo(hostname, None)
+            for addr in addr_info:
+                sockaddr = addr[4]
+                ip_str = sockaddr[0]
+                try:
+                    resolved_ip = ipaddress.ip_address(ip_str)
+                    ok, err = check_ip_ssrf(resolved_ip)
+                    if not ok:
+                        return False, f"Hostname '{hostname}' resolves to blocked private IP '{resolved_ip}' (SSRF prevention)."
+                except ValueError:
+                    pass
+        except socket.gaierror:
+            # If domain fails resolution, block if hostname suggests internal network
+            if any(h in hostname for h in ("internal", "local", "corp", "lan")):
+                return False, f"Resolution failed for internal hostname: '{hostname}'"
+        except Exception:
+            pass
 
     return True, None
 
@@ -139,6 +243,23 @@ def clone_repository(
     # Use argv with '--' option terminator to guarantee safe_url cannot be parsed as a git option
     argv = ["git", "clone", "--depth", "1", "--", safe_url, str(target_path)]
     proc_env = build_safe_environment()
+
+    # Re-check URL safety and re-resolve DNS immediately prior to subprocess launch (defeat DNS rebinding TOCTOU)
+    recheck_safe, recheck_reason = validate_repo_url(safe_url)
+    if not recheck_safe:
+        from backend.metrics import security_violations
+        security_violations.labels(violation_type='ssrf').inc()
+        return ExecutionResult(
+            workflow_id=workflow_id,
+            step="clone_repository",
+            step_id=step_id,
+            command="git clone",
+            exit_code=126,
+            stdout="",
+            stderr=f"Security blocked: DNS rebinding or invalid URL: {recheck_reason}",
+            workspace=str(target_path),
+            metadata={"security_blocked": True, "repo_url": safe_url},
+        )
 
     try:
         proc = subprocess.run(

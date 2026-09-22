@@ -16,12 +16,26 @@ from backend.models.workflow import (
     WorkflowStatus,
 )
 
+import time
 from typing import Dict, Optional
 
 logger = logging.getLogger("agentguard.api.workflow")
 router = APIRouter(tags=["workflow"])
 
 _idempotency_cache: Dict[str, str] = {}  # key -> workflow_id
+_verify_replay_cache: Dict[str, float] = {}  # nonce -> timestamp
+
+
+def reset_verify_replay_cache():
+    """Clear in-memory verify nonce replay cache."""
+    _verify_replay_cache.clear()
+
+
+def _cleanup_expired_nonces(window: float = 120.0):
+    cutoff = time.time() - window
+    expired = [n for n, ts in _verify_replay_cache.items() if ts < cutoff]
+    for n in expired:
+        _verify_replay_cache.pop(n, None)
 
 
 def verify_workflow_ownership(workflow: WorkflowState, request: Request, workflow_id: str):
@@ -195,11 +209,13 @@ def external_verify(
     payload: VerifyStepRequest,
     request: Request,
     x_agentguard_verify_signature: Optional[str] = Header(None, alias="X-AgentGuard-Verify-Signature"),
-    x_agentguard_verify_token: Optional[str] = Header(None, alias="X-AgentGuard-Verify-Token"),
+    x_agentguard_verify_timestamp: Optional[str] = Header(None, alias="X-AgentGuard-Verify-Timestamp"),
+    x_agentguard_verify_nonce: Optional[str] = Header(None, alias="X-AgentGuard-Verify-Nonce"),
 ) -> WorkflowState:
     """
     Integration hook for Evidence Engine verification.
-    Enforces HMAC-SHA256 signature verification or verification token auth.
+    Enforces mandatory HMAC-SHA256 signature verification bound to workflow_id,
+    step_id, evidence_digest, timestamp, and nonce.
     Guarded by tenant ownership.
     """
     workflow = workflow_store.get(workflow_id)
@@ -211,23 +227,78 @@ def external_verify(
 
     verify_workflow_ownership(workflow, request, workflow_id)
 
-    # HMAC-SHA256 signature verification
-    if x_agentguard_verify_signature:
-        secret = getattr(settings, "VERIFY_HMAC_SECRET", "agentguard-hmac-secret-key-prod")
-        step_part = payload.step_id or ""
-        msg = f"{workflow_id}:{step_part}".encode("utf-8")
-        expected_sig = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(x_agentguard_verify_signature, expected_sig):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid X-AgentGuard-Verify-Signature HMAC signature",
-            )
-    elif getattr(settings, "VERIFY_TOKEN", None):
-        if not x_agentguard_verify_token or x_agentguard_verify_token != settings.VERIFY_TOKEN:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid or missing X-AgentGuard-Verify-Token header",
-            )
+    # 1. Signature header is strictly mandatory (no unauthenticated fallback)
+    if not x_agentguard_verify_signature:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing mandatory X-AgentGuard-Verify-Signature header",
+        )
+
+    # 2. Secret must be explicitly configured and never the hardcoded default
+    secret = getattr(settings, "VERIFY_HMAC_SECRET", None)
+    if not secret or secret == "agentguard-hmac-secret-key-prod":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Server HMAC secret is unconfigured or using insecure default",
+        )
+
+    # 3. Locate target step to bind signature to step and its evidence_digest
+    step_part = payload.step_id or ""
+    step_def = next((s for s in workflow.steps if s.id == step_part), None)
+    if not step_def:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Step with id '{step_part}' not found in workflow '{workflow_id}' or signature rejected",
+        )
+
+    evidence_digest = step_def.evidence_digest or ""
+    if not evidence_digest and step_def.execution_result:
+        evidence_digest = step_def.execution_result.evidence_digest or ""
+
+    # 4. Mandatory Timestamp and Nonce anti-replay verification
+    if not x_agentguard_verify_timestamp:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing mandatory X-AgentGuard-Verify-Timestamp header",
+        )
+    try:
+        req_ts = float(x_agentguard_verify_timestamp)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid timestamp in X-AgentGuard-Verify-Timestamp header",
+        )
+
+    # 60-second bounded skew window
+    now = time.time()
+    if abs(now - req_ts) > 60.0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Timestamp skew exceeded or request expired (max 60s)",
+        )
+
+    if not x_agentguard_verify_nonce:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing mandatory X-AgentGuard-Verify-Nonce header",
+        )
+
+    _cleanup_expired_nonces()
+    if x_agentguard_verify_nonce in _verify_replay_cache:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Replay attack detected: Nonce has already been used",
+        )
+    _verify_replay_cache[x_agentguard_verify_nonce] = req_ts
+
+    # 5. Compute HMAC bound to workflow_id, step_id, evidence_digest, timestamp, nonce
+    msg = f"{workflow_id}:{step_part}:{evidence_digest}:{x_agentguard_verify_timestamp}:{x_agentguard_verify_nonce}".encode("utf-8")
+    expected_sig = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(x_agentguard_verify_signature, expected_sig):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid X-AgentGuard-Verify-Signature HMAC signature",
+        )
 
     orchestrator = WorkflowOrchestrator()
     try:

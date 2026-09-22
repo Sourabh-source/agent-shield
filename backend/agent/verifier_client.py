@@ -1,5 +1,6 @@
 import abc
 import logging
+import os
 import re
 from typing import Optional
 import httpx
@@ -11,6 +12,29 @@ from backend.models.reason_codes import ReasonCode
 logger = logging.getLogger("agentguard.verifier_client")
 
 VERIFIER_VERSION = "2.0.0"
+
+
+def is_pid_alive(pid: int) -> bool:
+    """Check if process with given PID is currently active."""
+    if not pid or pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            exit_code = ctypes.c_ulong()
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            kernel32.CloseHandle(handle)
+            return exit_code.value == 259
+        return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
 
 
 class VerificationClient(abc.ABC):
@@ -107,6 +131,19 @@ class DeterministicEvidenceVerifier(VerificationClient):
         combined_logs = f"{stdout}\n{stderr}"
         combined_lower = combined_logs.lower()
 
+        # Cross-step detection of unhandled Python tracebacks (regardless of exit code)
+        if "traceback (most recent call last):" in combined_lower:
+            return VerificationResult(
+                verified=False,
+                status="FAILED",
+                reason="Unhandled Python exception traceback detected in execution output",
+                recovery_required=True,
+                recovery_action=None,
+                retry_allowed=True,
+                failure_type="RUNTIME_ERROR",
+                reason_code=ReasonCode.BUILD_ERROR_DETECTED,
+            )
+
         # StepType dispatch: prefer explicit step_type enum
         step_type = getattr(execution_result, "step_type", None)
         step_name = (execution_result.step or "").lower()
@@ -149,7 +186,7 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     status="FAILED",
                     reason=f"Port conflict detected during execution: {stderr[:150].strip() or stdout[:150].strip()}",
                     recovery_required=True,
-                    recovery_action="echo 'Killing conflicting process'",
+                    recovery_action=None,
                     retry_allowed=True,
                     failure_type="PORT_ERROR",
                 
@@ -205,7 +242,7 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     status="FAILED",
                     reason=f"Command execution timed out: {stderr[:150].strip() or 'Timeout expired'}",
                     recovery_required=True,
-                    recovery_action="echo 'Retrying with extended timeout'",
+                    recovery_action=None,
                     retry_allowed=True,
                     failure_type="TIMEOUT",
                 
@@ -277,7 +314,7 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     status="FAILED",
                     reason=f"Health check failed with exit code {execution_result.exit_code}: {stderr[:150].strip() or stdout[:150].strip()}",
                     recovery_required=True,
-                    recovery_action="echo 'Waiting for service readiness'",
+                    recovery_action=None,
                     retry_allowed=True,
                     failure_type="NETWORK_ERROR",
                 
@@ -298,7 +335,7 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 status="FAILED",
                 reason=f"Step '{execution_result.step}' failed with exit code {execution_result.exit_code}: {stderr[:150].strip() or stdout[:150].strip() or 'Execution error'}",
                 recovery_required=True,
-                recovery_action="echo 'Attempting automatic workspace cleanup'",
+                recovery_action=None,
                 retry_allowed=True,
                 failure_type="UNKNOWN_ERROR",
             
@@ -344,6 +381,11 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 r"fail\t",
                 r"tests:.*[1-9]\d*\s+failed",
                 r"\b[1-9]\d*\s+failed\b",
+                r"\b[1-9]\d*\s+failing\b",
+                r"(?:^|\n)\s*not ok\b",
+                r"\bnot ok\s+\d+",
+                r"(?:^|\n)\s*failed\s+",
+                r"\bfailed\s+[a-zA-Z0-9_./\\:-]+",
             ]
             for pattern in fatal_test_errors:
                 if re.search(pattern, combined_lower):
@@ -415,6 +457,18 @@ class DeterministicEvidenceVerifier(VerificationClient):
 
         # 3. BUILD_PROJECT
         if step_type == StepType.BUILD_PROJECT.value:
+            # Check for bare echo commands: never VERIFIED, mark NOT_APPLICABLE
+            cmd_clean = (execution_result.command or "").strip().lower()
+            if cmd_clean.startswith("echo") or not cmd_clean:
+                return VerificationResult(
+                    verified=False,
+                    status="NOT_APPLICABLE",
+                    reason="Bare echo command does not constitute build evidence; marked NOT_APPLICABLE.",
+                    recovery_required=False,
+                    retry_allowed=False,
+                    reason_code=ReasonCode.STEP_NOT_APPLICABLE,
+                )
+
             fatal_build_errors = [
                 "syntaxerror:",
                 "indentationerror:",
@@ -444,19 +498,37 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 status="VERIFIED",
                 reason="Build verified: clean compilation with exit code 0",
                 recovery_required=False,
-            
-            reason_code=ReasonCode.EXIT_ZERO_CLEAN,)
+                reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+            )
 
         # 4. HEALTH_CHECK
         if step_type == StepType.HEALTH_CHECK.value:
             status_code = metadata.get("status_code")
-            if status_code is not None and (status_code < 200 or status_code >= 300):
+            if status_code is None:
+                match = re.search(r"http[/\s\d\.]*([1-5]\d{2})", stdout, re.IGNORECASE)
+                if match:
+                    try:
+                        status_code = int(match.group(1))
+                    except ValueError:
+                        pass
+            if status_code is None:
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason="Health check verification failed: missing HTTP status_code in metadata",
+                    recovery_required=True,
+                    recovery_action=None,
+                    retry_allowed=True,
+                    failure_type="NETWORK_ERROR",
+                    reason_code=ReasonCode.HEALTH_CHECK_FAILED,
+                )
+            if status_code < 200 or status_code >= 300:
                 return VerificationResult(
                     verified=False,
                     status="FAILED",
                     reason=f"Health check failed with HTTP status {status_code}",
                     recovery_required=True,
-                    recovery_action="echo 'Restarting service'",
+                    recovery_action=None,
                     retry_allowed=True,
                     failure_type="NETWORK_ERROR",
                 
@@ -467,7 +539,7 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     status="FAILED",
                     reason="Health check endpoint connection failed or returned error status",
                     recovery_required=True,
-                    recovery_action="echo 'Waiting for service readiness'",
+                    recovery_action=None,
                     retry_allowed=True,
                     failure_type="NETWORK_ERROR",
                 
@@ -477,8 +549,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 status="VERIFIED",
                 reason="Health check verified: endpoint responded successfully with valid HTTP status",
                 recovery_required=False,
-            
-            reason_code=ReasonCode.EXIT_ZERO_CLEAN,)
+                reason_code=ReasonCode.HEALTH_CHECK_PASSED,
+            )
 
         # 5. START_APPLICATION
         if step_type == StepType.START_APPLICATION.value:
@@ -488,19 +560,45 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     status="FAILED",
                     reason="Port conflict detected during application start",
                     recovery_required=True,
-                    recovery_action="echo 'Killing conflicting process'",
+                    recovery_action=None,
                     retry_allowed=True,
                     failure_type="PORT_ERROR",
                 
             reason_code=ReasonCode.PORT_CONFLICT,)
             pid = metadata.get("pid")
+            if not pid or not isinstance(pid, int) or pid <= 0:
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason="Application startup verification failed: missing or invalid PID in metadata",
+                    recovery_required=False,
+                    retry_allowed=False,
+                    reason_code=ReasonCode.UNKNOWN,
+                )
+
+            is_alive = metadata.get("process_alive")
+            if is_alive is None:
+                is_alive = is_pid_alive(pid)
+
+            if not is_alive:
+                return VerificationResult(
+                    verified=False,
+                    status="FAILED",
+                    reason=f"Application startup verification failed: process with PID {pid} is not running",
+                    recovery_required=True,
+                    recovery_action=None,
+                    retry_allowed=True,
+                    failure_type="PROCESS_EXITED",
+                    reason_code=ReasonCode.UNKNOWN,
+                )
+
             return VerificationResult(
                 verified=True,
                 status="VERIFIED",
-                reason=f"Application startup verified: process running (PID: {pid})" if pid else "Application startup verified: process started successfully",
+                reason=f"Application startup verified: process running (PID: {pid})",
                 recovery_required=False,
-            
-            reason_code=ReasonCode.UNKNOWN,)
+                reason_code=ReasonCode.EXIT_ZERO_CLEAN,
+            )
 
         # 6. CLONE_REPOSITORY
         if step_type == StepType.CLONE_REPOSITORY.value:
@@ -583,7 +681,7 @@ class HttpVerifierClient(VerificationClient):
                 status="FAILED",
                 reason=f"External verification service error: {str(e)}",
                 recovery_required=False,
-                recovery_action="echo 'Waiting for external verifier availability'",
+                recovery_action=None,
                 retry_allowed=False,
                 metadata={"verifier_unavailable": True, "service_unavailable": True},
             

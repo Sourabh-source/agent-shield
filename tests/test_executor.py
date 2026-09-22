@@ -25,18 +25,22 @@ def test_failed_shell_command_returns_nonzero():
 
 
 def test_shell_captures_stderr():
-    # In PowerShell or cmd, write to stderr
-    res = execute_shell_command("python -c \"import sys; sys.stderr.write('Test error message\\n')\"", workflow_id="test-1")
-    assert res.exit_code == 0
-    assert "Test error message" in res.stderr
+    with tempfile.TemporaryDirectory() as tmpdir:
+        script = Path(tmpdir) / "err.py"
+        script.write_text("import sys; sys.stderr.write('Test error message\\n')\n")
+        res = execute_shell_command("python err.py", cwd=tmpdir, workflow_id="test-1")
+        assert res.exit_code == 0
+        assert "Test error message" in res.stderr
 
 
 def test_command_timeout():
-    # Run sleep for 5s with 1s timeout
-    res = execute_shell_command("python -c \"import time; time.sleep(5)\"", timeout_seconds=1, workflow_id="test-1")
-    assert res.exit_code == 124
-    assert res.metadata.get("timed_out") is True
-    assert "timed out" in res.stderr
+    with tempfile.TemporaryDirectory() as tmpdir:
+        script = Path(tmpdir) / "sleep.py"
+        script.write_text("import time; time.sleep(5)\n")
+        res = execute_shell_command("python sleep.py", cwd=tmpdir, timeout_seconds=1, workflow_id="test-1")
+        assert res.exit_code == 124
+        assert res.metadata.get("timed_out") is True
+        assert "timed out" in res.stderr
 
 
 def test_destructive_command_blocking():

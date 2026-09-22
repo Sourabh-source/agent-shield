@@ -379,11 +379,12 @@ class TestHealthCheckGoldenCorpus:
 class TestStartAndCloneGoldenCorpus:
 
     def test_app_start_clean_running_pid(self):
+        import os
         res = verifier.verify(make_exec_result(
             step="start_application",
             step_type=StepType.START_APPLICATION.value,
-            stdout="Application started in background (PID 4321)",
-            metadata={"pid": 4321},
+            stdout=f"Application started in background (PID {os.getpid()})",
+            metadata={"pid": os.getpid()},
         ))
         assert res.verified is True
 

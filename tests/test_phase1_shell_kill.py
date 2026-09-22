@@ -228,8 +228,10 @@ class TestExecutableAllowlist:
         """python IS in the allowlist — must succeed."""
         from backend.tools.shell_tool import execute_shell_command
 
+        script = tmp_path / "script.py"
+        script.write_text("print('allowed')\n")
         result = execute_shell_command(
-            command=f'"{sys.executable}" -c "print(\'allowed\')"',
+            command=f'"{sys.executable}" script.py',
             cwd=str(tmp_path),
             timeout_seconds=5,
             workflow_id="test",
@@ -383,8 +385,10 @@ class TestEnvironmentIsolation:
         """PATH must be in the allowlist (needed for finding executables)."""
         from backend.tools.shell_tool import execute_shell_command
 
+        script = tmp_path / "check_path.py"
+        script.write_text("import os; print('PATH=' + str(bool(os.environ.get('PATH'))))\n")
         result = execute_shell_command(
-            command=f'"{sys.executable}" -c "import os; print(\'PATH=\' + str(bool(os.environ.get(\'PATH\'))))"',
+            command=f'"{sys.executable}" check_path.py',
             cwd=str(tmp_path),
             timeout_seconds=5,
             workflow_id="test",
@@ -399,8 +403,10 @@ class TestEnvironmentIsolation:
         from backend.tools.shell_tool import execute_shell_command
 
         home_var = "USERPROFILE" if os.name == "nt" else "HOME"
+        script = tmp_path / "check_home.py"
+        script.write_text(f"import os; print('HOME=' + str(bool(os.environ.get('{home_var}'))))\n")
         result = execute_shell_command(
-            command=f'"{sys.executable}" -c "import os; print(\'HOME=\' + str(bool(os.environ.get(\'{home_var}\'))))"',
+            command=f'"{sys.executable}" check_home.py',
             cwd=str(tmp_path),
             timeout_seconds=5,
             workflow_id="test",

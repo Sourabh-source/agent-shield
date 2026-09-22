@@ -92,6 +92,28 @@ def test_create_evidence_record_attaches_full_payload():
     assert rec.payload["exit_code"] == 0
 
 
+import hashlib
+import hmac
+import time
+import uuid
+
+TEST_HMAC_SECRET = "production-grade-random-hmac-secret-999888777"
+
+
+def _make_verify_headers(workflow_id: str, step_id: str = "", evidence_digest: str = ""):
+    settings.VERIFY_HMAC_SECRET = TEST_HMAC_SECRET
+    ts = str(time.time())
+    nonce = str(uuid.uuid4())
+    msg = f"{workflow_id}:{step_id}:{evidence_digest}:{ts}:{nonce}".encode("utf-8")
+    sig = hmac.new(TEST_HMAC_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+    return {
+        "X-AgentGuard-Verify-Signature": sig,
+        "X-AgentGuard-Verify-Timestamp": ts,
+        "X-AgentGuard-Verify-Nonce": nonce,
+        "X-API-Key": "test-api-key",
+    }
+
+
 def test_verify_rejects_replay_attack_on_already_verified_step():
     """Reject verification attempts on steps that have already reached VERIFIED_SUCCESS."""
     orchestrator = WorkflowOrchestrator()
@@ -105,8 +127,10 @@ def test_verify_rejects_replay_attack_on_already_verified_step():
     wf.steps = [step]
     workflow_store.save(wf)
 
+    headers = _make_verify_headers(wf.workflow_id, "s1", "")
     resp = client.post(
         f"/workflow/{wf.workflow_id}/verify",
+        headers=headers,
         json={
             "step_id": "s1",
             "verification_result": {"verified": True, "reason": "replay attempt"},
@@ -136,8 +160,10 @@ def test_verify_rejects_execution_id_mismatch():
     wf.steps = [step]
     workflow_store.save(wf)
 
+    headers = _make_verify_headers(wf.workflow_id, "s1", exec_res.evidence_digest)
     resp = client.post(
         f"/workflow/{wf.workflow_id}/verify",
+        headers=headers,
         json={
             "step_id": "s1",
             "verification_result": {
@@ -172,8 +198,10 @@ def test_verify_rejects_evidence_digest_mismatch():
     wf.steps = [step]
     workflow_store.save(wf)
 
+    headers = _make_verify_headers(wf.workflow_id, "s1", exec_res.evidence_digest)
     resp = client.post(
         f"/workflow/{wf.workflow_id}/verify",
+        headers=headers,
         json={
             "step_id": "s1",
             "verification_result": {
@@ -196,8 +224,10 @@ def test_verify_rejects_cancelled_workflow():
     wf.steps = [step]
     workflow_store.save(wf)
 
+    headers = _make_verify_headers(wf.workflow_id, "s1", "")
     resp = client.post(
         f"/workflow/{wf.workflow_id}/verify",
+        headers=headers,
         json={
             "step_id": "s1",
             "verification_result": {"verified": True},
@@ -208,36 +238,40 @@ def test_verify_rejects_cancelled_workflow():
 
 
 def test_verify_token_auth_enforcement():
-    """When VERIFY_TOKEN is configured, verify requires valid X-AgentGuard-Verify-Token header."""
+    """Verify endpoint enforces mandatory cryptographic HMAC signature."""
     orchestrator = WorkflowOrchestrator()
     wf = orchestrator.create_workflow(repo_url="https://github.com/example/repo", task="test")
     step = StepDefinition(id="s1", type="build_project", name="Build", status=StepStatus.RUNNING)
     wf.steps = [step]
     workflow_store.save(wf)
 
-    with patch.object(settings, "VERIFY_TOKEN", "secret-token-xyz"):
-        # Request with missing token
-        resp_no_token = client.post(
-            f"/workflow/{wf.workflow_id}/verify",
-            json={"step_id": "s1", "verification_result": {"verified": True}},
-        )
-        assert resp_no_token.status_code == 403
+    # Request with missing HMAC signature -> 403
+    resp_no_sig = client.post(
+        f"/workflow/{wf.workflow_id}/verify",
+        json={"step_id": "s1", "verification_result": {"verified": True}},
+    )
+    assert resp_no_sig.status_code == 403
 
-        # Request with invalid token
-        resp_bad_token = client.post(
-            f"/workflow/{wf.workflow_id}/verify",
-            headers={"X-AgentGuard-Verify-Token": "wrong-token"},
-            json={"step_id": "s1", "verification_result": {"verified": True}},
-        )
-        assert resp_bad_token.status_code == 403
+    # Request with invalid HMAC signature -> 403
+    resp_bad_sig = client.post(
+        f"/workflow/{wf.workflow_id}/verify",
+        headers={
+            "X-AgentGuard-Verify-Signature": "invalid-signature-hex",
+            "X-AgentGuard-Verify-Timestamp": str(time.time()),
+            "X-AgentGuard-Verify-Nonce": str(uuid.uuid4()),
+        },
+        json={"step_id": "s1", "verification_result": {"verified": True}},
+    )
+    assert resp_bad_sig.status_code == 403
 
-        # Request with valid token
-        resp_valid = client.post(
-            f"/workflow/{wf.workflow_id}/verify",
-            headers={"X-AgentGuard-Verify-Token": "secret-token-xyz"},
-            json={"step_id": "s1", "verification_result": {"verified": True}},
-        )
-        assert resp_valid.status_code == 200
+    # Request with valid HMAC signature -> 200
+    valid_headers = _make_verify_headers(wf.workflow_id, "s1", "")
+    resp_valid = client.post(
+        f"/workflow/{wf.workflow_id}/verify",
+        headers=valid_headers,
+        json={"step_id": "s1", "verification_result": {"verified": True}},
+    )
+    assert resp_valid.status_code == 200
 
 
 # =========================================================================
@@ -347,14 +381,17 @@ def test_real_recovery_action_for_port_error():
 # 4. Security & Subprocess Hardening (Phases 10-14)
 # =========================================================================
 
-def test_shell_env_filters_sensitive_secrets():
+def test_shell_env_filters_sensitive_secrets(tmp_path):
     """execute_shell_command strips GEMINI_, AWS_, GITHUB_ keys from subprocess environment."""
     os.environ["GEMINI_API_KEY"] = "secret_gemini_test_token"
     os.environ["AWS_SECRET_ACCESS_KEY"] = "secret_aws_test_key"
+    script = tmp_path / "check_env.py"
+    script.write_text("import os; print('HAS_GEMINI:', 'GEMINI_API_KEY' in os.environ); print('HAS_AWS:', 'AWS_SECRET_ACCESS_KEY' in os.environ)", encoding="utf-8")
     try:
-        # Run python to inspect os.environ inside the subprocess
+        # Run python script inside the workspace to inspect os.environ inside the subprocess
         res = execute_shell_command(
-            'python -c "import os; print(\'HAS_GEMINI:\', \'GEMINI_API_KEY\' in os.environ); print(\'HAS_AWS:\', \'AWS_SECRET_ACCESS_KEY\' in os.environ)"',
+            "python check_env.py",
+            cwd=str(tmp_path),
             workflow_id="sec-env-test",
         )
         assert res.exit_code == 0
@@ -418,11 +455,14 @@ def test_process_lifecycle_cleanup_terminates_trees():
     """ToolExecutor.cleanup() terminates tracked process trees without lingering processes."""
     with tempfile.TemporaryDirectory() as ws:
         executor = ToolExecutor(workflow_id="proc-test", workspace_base=ws)
+        os.makedirs(executor.workspace_dir, exist_ok=True)
+        script_file = Path(executor.workspace_dir) / "sleep_srv.py"
+        script_file.write_text("import time; time.sleep(60)", encoding="utf-8")
         step = StepDefinition(
             id="s_bg",
             type=StepType.START_APPLICATION.value,
             name="Long-running start",
-            command="python -c \"import time; time.sleep(60)\"",
+            command="python sleep_srv.py",
         )
         res = executor.execute_step(step=step, repo_url="https://github.com/example/repo")
         assert res.exit_code == 0

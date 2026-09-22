@@ -17,6 +17,15 @@ def validate_api_key_format(api_key: str) -> bool:
         return False
     return True
 
+_active_auth_instances = []
+
+
+def reset_rate_limiter():
+    """Clear in-memory rate limiting history across all active AuthMiddleware instances."""
+    for inst in _active_auth_instances:
+        inst._request_history.clear()
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """
     Enforces API key authentication and sliding-window rate limiting on all non-exempt endpoints.
@@ -27,6 +36,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.exempt_paths: Set[str] = {"/", "/health", "/docs", "/openapi.json", "/redoc", "/metrics"}
         self._request_history: Dict[str, collections.deque] = collections.defaultdict(collections.deque)
+        _active_auth_instances.append(self)
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path

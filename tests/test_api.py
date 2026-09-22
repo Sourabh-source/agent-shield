@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.models.workflow import StepDefinition, VerificationResult, WorkflowStatus
 from backend.agent.orchestrator import workflow_store, WorkflowOrchestrator
+from tests.conftest import make_test_verify_headers
 
 client = TestClient(app, headers={"X-API-Key": "test-api-key"})
 
@@ -87,7 +88,8 @@ def test_external_verify_endpoint():
         },
     }
 
-    resp = client.post(f"/workflow/{wf.workflow_id}/verify", json=verif_payload)
+    headers = make_test_verify_headers(wf.workflow_id, "step_bld", "")
+    resp = client.post(f"/workflow/{wf.workflow_id}/verify", headers=headers, json=verif_payload)
     assert resp.status_code == 200
     data = resp.json()
     assert data["verification_status"] == "PASS"

@@ -181,18 +181,19 @@ AgentGuard is a prototype system that runs subprocesses locally and relies on an
 
 ---
 
-## 🧪 Testing Summary
-
-- **Total Automated Pytest Tests**: **287+ passing** (0 failures, 0 regressions)
-  - Unit tests for all tool sandboxes (Shell, Git, HTTP, File, Python, Pip)
-  - Path traversal & command injection security tests
-  - SSRF protection tests against cloud instance metadata services
-  - Deterministic SHA-256 evidence digest verification
-  - Adversarial replay attack & execution ID mismatch rejection
-  - Real subprocess failure injection & recovery execution
-  - Process tree termination on Windows/POSIX
-  - SQLite WAL mode, pagination, and cascade deletion
-  - Full API integration & Frontend / Verifier contract compliance
-- **Frontend Code Quality**:
-  - `npm run lint`: **0 errors, 0 warnings**
-  - `npm run build`: **Turbopack production build succeeded**
+## 🧪 Testing & Verification
+ 
+- **Automated Test Suite**: Executed via `pytest` across multi-platform CI (`ubuntu-latest` and `windows-latest`):
+-   - Unit tests for all tool sandboxes (Shell, Git, HTTP, File, Python, Pip)
+-   - Path traversal, symlink escape, and command injection security tests
+-   - SSRF protection tests covering IP octal, decimal, hex, and cloud metadata bypasses
+-   - Deterministic SHA-256 evidence digest verification
+-   - Adversarial replay attack & execution ID mismatch rejection
+-   - Mandatory cryptographic HMAC-SHA256 signature verification with nonces and timestamps
+-   - Real subprocess failure injection & recovery execution
+-   - Process tree termination on Windows/POSIX
+-   - 25+ real-world secret redaction test corpus with zero false-positive assertions
+-   - Automated claim verification gate: `python scripts/verify_security_review.py`
+- - **Frontend Code Quality**:
+-   - `npm run lint`: **0 errors, 0 warnings**
+-   - `npm run build`: **Turbopack production build succeeded**

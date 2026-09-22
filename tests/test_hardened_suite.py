@@ -94,9 +94,12 @@ def test_path_traversal_blocked():
 
 def test_command_timeout():
     """Case 5: Runaway processes are terminated after timeout (exit code 124)."""
-    res = execute_shell_command("python -c \"import time; time.sleep(5)\"", timeout_seconds=1, workflow_id="sec-3")
-    assert res.exit_code == 124
-    assert res.metadata.get("timed_out") is True
+    with tempfile.TemporaryDirectory() as tmpdir:
+        script = Path(tmpdir) / "sleep.py"
+        script.write_text("import time; time.sleep(5)\n")
+        res = execute_shell_command("python sleep.py", cwd=tmpdir, timeout_seconds=1, workflow_id="sec-3")
+        assert res.exit_code == 124
+        assert res.metadata.get("timed_out") is True
 
 
 def test_huge_stdout_truncated():
