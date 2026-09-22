@@ -17,6 +17,12 @@ from backend.models.workflow import (
     RecoveryPlan,
     StepDefinition,
 )
+from backend.tools.port_utils import (
+    find_free_port,
+    find_process_holding_port,
+    is_port_in_use,
+    rewrite_port_in_command,
+)
 from backend.tools.registry import tool_registry
 
 logger = logging.getLogger("agentguard.recovery_planner")
@@ -72,11 +78,8 @@ class RecoveryPlanner:
                 return False
             try:
                 port = int(target)
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    s.bind(("127.0.0.1", port))
-                return True
-            except (OSError, ValueError):
+                return not is_port_in_use(port)
+            except (OSError, ValueError, TypeError):
                 return False
 
         elif post_type == "file_exists":
@@ -110,6 +113,26 @@ class RecoveryPlanner:
                 return False
 
             return False
+
+        elif post_type == "port_allocated_and_rewritten":
+            if not target:
+                return False
+            try:
+                port = int(target)
+            except (ValueError, TypeError):
+                return False
+
+            # 1. Verify step command was rewritten to use the new port
+            if step is not None and step.command:
+                if str(port) not in step.command:
+                    return False
+
+            # 2. Verify rewritten_command in plan contains the new port
+            if plan.rewritten_command and str(port) not in plan.rewritten_command:
+                return False
+
+            # 3. Verify the newly allocated port is currently free to bind
+            return not is_port_in_use(port)
 
         # Fallback to postcondition_cmd if explicitly specified
         if plan.postcondition_cmd:
@@ -243,24 +266,64 @@ class RecoveryPlanner:
 
         # 3. Port Error
         elif classification.failure_type == FailureType.PORT_ERROR:
-            port = str(details.get("port", "8000"))
-            if suggested_action:
-                cmd = suggested_action
-            elif os.name == "nt":
-                cmd = f'powershell -NoProfile -NonInteractive -Command "Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}"'
-            else:
-                cmd = f"fuser -k {port}/tcp 2>/dev/null || true"
+            try:
+                port = int(details.get("port", "8000"))
+            except (ValueError, TypeError):
+                port = 8000
+
+            # Determine holding PID and workflow-owned PIDs
+            holding_pid = details.get("holding_pid") or find_process_holding_port(port)
+            owned_pids = set(details.get("spawned_pids") or [])
+            if hasattr(exec_result, "metadata") and exec_result.metadata:
+                if "spawned_pids" in exec_result.metadata:
+                    owned_pids.update(exec_result.metadata["spawned_pids"])
+                if "pid" in exec_result.metadata and exec_result.metadata["pid"]:
+                    try:
+                        owned_pids.add(int(exec_result.metadata["pid"]))
+                    except (ValueError, TypeError):
+                        pass
+
+            # Case A: Holding process is known and belongs to this workflow -> terminate ONLY this zombie process
+            if holding_pid and holding_pid in owned_pids:
+                if os.name == "nt":
+                    cmd = f"taskkill /F /PID {holding_pid}"
+                else:
+                    cmd = f"kill -9 {holding_pid}"
+                return RecoveryPlan(
+                    reason=f"Port {port} is occupied by workflow zombie process (PID {holding_pid}). Safely terminating owned process.",
+                    failure_type=failure_type,
+                    action_type="release_port",
+                    tool="shell",
+                    command=cmd,
+                    target_step=target_step,
+                    max_attempts=max_attempts,
+                    postcondition_type="port_free",
+                    postcondition_target=str(port),
+                    expected_outcome=RecoveryOutcome.SUCCESS,
+                )
+
+            # Case B: Foreign process or unknown -> NEVER kill foreign process! Relocate port!
+            new_port = find_free_port(start_port=port)
+            original_cmd = exec_result.command or ""
+            rewritten_cmd = rewrite_port_in_command(original_cmd, port, new_port)
 
             return RecoveryPlan(
-                reason=classification.reason,
+                reason=(
+                    f"Port {port} is occupied by an external/foreign process"
+                    + (f" (PID {holding_pid})" if holding_pid else "")
+                    + f". Relocating step to available port {new_port} without terminating foreign processes."
+                ),
                 failure_type=failure_type,
-                action_type="release_port",
+                action_type="relocate_port",
                 tool="shell",
-                command=cmd,
+                command=f'"{sys.executable}" -c "print(\'Port relocated to {new_port}\')"',
                 target_step=target_step,
                 max_attempts=max_attempts,
-                postcondition_type="port_free",
-                postcondition_target=port,
+                new_port=new_port,
+                rewritten_command=rewritten_cmd,
+                postcondition_type="port_allocated_and_rewritten",
+                postcondition_target=str(new_port),
+                expected_outcome=RecoveryOutcome.SUCCESS,
             )
 
         # 4. Resource Limit

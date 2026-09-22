@@ -549,6 +549,13 @@ class WorkflowOrchestrator:
 
                         # Failure classification
                         classification = classify_failure(exec_result)
+                        if classification.details is None:
+                            classification.details = {}
+                        owned_pids = set(getattr(workflow, "spawned_pids", []) or [])
+                        if hasattr(executor, "_spawned_pids"):
+                            owned_pids.update(executor._spawned_pids)
+                        classification.details["spawned_pids"] = list(owned_pids)
+
                         self.emit_event(
                             workflow,
                             EventType.FAILURE_CLASSIFIED,
@@ -624,9 +631,11 @@ class WorkflowOrchestrator:
                                 workflow_store.save(workflow)
                                 return workflow
 
-                            # Apply any step-level overrides (such as extended timeout)
+                            # Apply any step-level overrides (such as extended timeout or relocated port)
                             if rec_plan.action_type == "extend_timeout" and rec_plan.timeout_override:
                                 step.timeout_seconds = rec_plan.timeout_override
+                            if rec_plan.action_type == "relocate_port" and rec_plan.rewritten_command:
+                                step.command = rec_plan.rewritten_command
 
                             # Check if recovery is already satisfied (idempotent check)
                             if recovery_planner.is_action_already_satisfied(rec_plan, executor.workspace_dir):
