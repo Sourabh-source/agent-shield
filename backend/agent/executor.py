@@ -231,7 +231,20 @@ class ToolExecutor:
 
         else:
             # Dispatch through ToolRegistry
-            cmd = step.command or "echo 'No command specified'"
+            cmd = step.command
+            if not cmd:
+                return ExecutionResult(
+                    workflow_id=self.workflow_id,
+                    step=step.name,
+                    step_id=step.id,
+                    command="none",
+                    exit_code=1,
+                    stdout="",
+                    stderr="No command specified for this step. Cannot execute.",
+                    duration_ms=0.0,
+                    workspace=self.workspace_dir,
+                )
+
             timeout = min(settings.DEFAULT_TIMEOUT_SECONDS, settings.MAX_STEP_TIME)
             
             tool = None
@@ -255,7 +268,7 @@ class ToolExecutor:
         step_id: Optional[str] = None,
     ) -> ExecutionResult:
         """
-        Executes a remediation action recommended by Member 3's verifier.
+        Executes a remediation action recommended by the Verifier.
         Dispatches through specialized tool from registry.
         """
         logger.info(f"Executing recovery action for workflow {self.workflow_id}: '{recovery_action}'")

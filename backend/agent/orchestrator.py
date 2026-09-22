@@ -11,7 +11,15 @@ from backend.agent.planner import generate_plan, update_plan_with_analysis
 from backend.agent.recovery_planner import recovery_planner
 from backend.agent.snapshot import capture_workspace_snapshot, diff_snapshots
 from backend.agent.verifier_client import VerificationClient, get_verifier_client
+from backend.audit.hash_chain import HashChain
 from backend.config import settings
+from backend.metrics import (
+    workflow_total,
+    workflow_duration_seconds,
+    active_workflows,
+    step_verification_result,
+    recovery_attempts_total,
+)
 from backend.models.workflow import (
     EvidenceRecord,
     EventType,
@@ -110,6 +118,20 @@ class WorkflowStore:
                 return self.sqlite.delete_workflow(workflow_id)
             return True
 
+    def delete_by_owner(self, owner_id: str) -> int:
+        """Removes all workflows for an owner from memory and SQLite store."""
+        with self._lock:
+            deleted_count = 0
+            to_delete = [wid for wid, wf in self._memory_cache.items() if getattr(wf, "owner_id", "default-owner") == owner_id]
+            for wid in to_delete:
+                self._memory_cache.pop(wid, None)
+            
+            if self.sqlite:
+                deleted_count = self.sqlite.delete_by_owner(owner_id)
+            else:
+                deleted_count = len(to_delete)
+            return deleted_count
+
 
 # Global singleton store
 workflow_store = WorkflowStore()
@@ -117,7 +139,7 @@ workflow_store = WorkflowStore()
 
 class WorkflowOrchestrator:
     """
-    Central controller for Member 2's backend.
+    Central controller for Orchestrator's backend.
     Enforces the core evidence loop:
     EXECUTE -> COLLECT EVIDENCE -> VERIFY -> CONTINUE / RECOVER -> VERIFY AGAIN
     """
@@ -132,13 +154,13 @@ class WorkflowOrchestrator:
     ):
         self.verifier_client = verifier_client or get_verifier_client()
         self.max_retries = max_retries if max_retries is not None else settings.MAX_RETRIES
+        self._hash_chain = HashChain()
 
     def create_workflow(
         self,
         repo_url: str,
         task: str,
         dry_run: bool = False,
-        demo_failure_mode: Optional[str] = None,
         owner_id: Optional[str] = "default-owner",
     ) -> WorkflowState:
         """Initializes a new workflow record and persists initial PENDING state."""
@@ -150,14 +172,13 @@ class WorkflowOrchestrator:
             overall_status=WorkflowStatus.PENDING,
             max_retries=self.max_retries,
             dry_run=dry_run,
-            demo_failure_mode=demo_failure_mode,
             owner_id=owner_id or "default-owner",
         )
         self.emit_event(
             state,
             EventType.WORKFLOW_STARTED,
             message=f"Workflow initialized for repo: {repo_url}" + (" [DRY RUN]" if dry_run else ""),
-            metadata={"dry_run": dry_run, "demo_failure_mode": demo_failure_mode, "owner_id": state.owner_id},
+            metadata={"dry_run": dry_run, "owner_id": state.owner_id},
         )
         workflow_store.save(state)
         return state
@@ -187,6 +208,18 @@ class WorkflowOrchestrator:
             evidence=evidence,
             metadata=metadata,
         )
+        
+        # Calculate hash for the new event
+        event_data = event.model_dump()
+        prev_hash = self._hash_chain._previous_hash
+        event_hash = self._hash_chain.append(event_data)
+        
+        # Add hash metadata
+        if event.metadata is None:
+            event.metadata = {}
+        event.metadata['previous_hash'] = prev_hash
+        event.metadata['event_hash'] = event_hash
+        
         workflow.events.append(event)
         workflow_store.save(workflow)
         logger.info(f"[{workflow.workflow_id}] Event: {event_type.value} - {message}")
@@ -251,6 +284,7 @@ class WorkflowOrchestrator:
                     return existing
 
             self._running_workflows.add(workflow_id)
+            active_workflows.inc()
 
         workflow = workflow_store.get(workflow_id)
         if not workflow:
@@ -271,6 +305,11 @@ class WorkflowOrchestrator:
                 message=workflow.final_result,
             )
             workflow_store.save(workflow)
+            active_workflows.dec()
+            workflow_total.labels(status=workflow.overall_status.value).inc()
+            workflow_duration_seconds.observe(time.perf_counter() - workflow_start_time)
+            with self._run_lock:
+                self._running_workflows.discard(workflow_id)
             return workflow
 
         # 1. Generate plan if not already planned
@@ -288,6 +327,11 @@ class WorkflowOrchestrator:
                 message=workflow.final_result,
             )
             workflow_store.save(workflow)
+            active_workflows.dec()
+            workflow_total.labels(status=workflow.overall_status.value).inc()
+            workflow_duration_seconds.observe(time.perf_counter() - workflow_start_time)
+            with self._run_lock:
+                self._running_workflows.discard(workflow_id)
             return workflow
 
         executor = ToolExecutor(workflow_id=workflow.workflow_id)
@@ -436,6 +480,13 @@ class WorkflowOrchestrator:
 
                     verif_result: VerificationResult = self.verifier_client.verify(exec_result)
                     step.verification_result = verif_result
+                    
+                    verdict = "unverifiable"
+                    if verif_result.metadata and (verif_result.metadata.get("verifier_unavailable") or verif_result.metadata.get("service_unavailable")):
+                        verdict = "unverifiable"
+                    else:
+                        verdict = "pass" if verif_result.verified else "fail"
+                    step_verification_result.labels(step_type=step.type, verdict=verdict).inc()
 
                     # Handle verifier service unavailability
                     if verif_result.metadata and (
@@ -562,6 +613,7 @@ class WorkflowOrchestrator:
                                     rec_plan, executor.workspace_dir
                                 )
                                 rec_status = "SUCCESS" if (rec_result.exit_code == 0 and postcond_met) else "FAILED"
+                                recovery_attempts_total.labels(failure_type=rec_plan.failure_type, outcome=rec_status.lower()).inc()
 
                                 attempt = RecoveryAttempt(
                                     recovery_id=rec_plan.recovery_id,
@@ -699,6 +751,10 @@ class WorkflowOrchestrator:
             return workflow
 
         finally:
+            active_workflows.dec()
+            workflow_total.labels(status=workflow.overall_status.value).inc()
+            total_time = time.perf_counter() - workflow_start_time
+            workflow_duration_seconds.observe(total_time)
             with self._run_lock:
                 self._running_workflows.discard(workflow_id)
                 self._active_executors.pop(workflow_id, None)
@@ -722,7 +778,7 @@ class WorkflowOrchestrator:
         step_id: Optional[str] = None,
     ) -> WorkflowState:
         """
-        Processes an external VerificationResult posted from Member 3 via callback.
+        Processes an external VerificationResult posted from Verifier via callback.
         Enforces closed-loop evidence verification, self-healing recovery, retry bounding,
         and state transitions without bypassing the evidence gate.
         """

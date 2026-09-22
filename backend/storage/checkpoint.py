@@ -147,7 +147,7 @@ class SQLiteCheckpointStorage:
                 state.verification_status,
                 state.final_result,
                 1 if state.dry_run else 0,
-                state.demo_failure_mode,
+                None,
                 json.dumps(state.metrics),
                 state.created_at,
                 state.updated_at,
@@ -309,7 +309,6 @@ class SQLiteCheckpointStorage:
                 verification_status=row["verification_status"],
                 final_result=row["final_result"],
                 dry_run=bool(row["dry_run"]),
-                demo_failure_mode=row["demo_failure_mode"],
                 owner_id=owner_id,
                 recovery_history=recovery_history,
                 metrics=metrics,
@@ -357,3 +356,16 @@ class SQLiteCheckpointStorage:
             cursor.execute("DELETE FROM recovery_history WHERE workflow_id = ?", (workflow_id,))
             conn.commit()
             return deleted_count > 0
+
+    def delete_by_owner(self, owner_id: str) -> int:
+        """Permanently deletes all workflows for a given owner_id."""
+        with self._lock, self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT workflow_id FROM workflows WHERE owner_id = ?", (owner_id,))
+            w_ids = [r["workflow_id"] for r in cursor.fetchall()]
+            
+            deleted_count = 0
+            for wid in w_ids:
+                if self.delete_workflow(wid):
+                    deleted_count += 1
+            return deleted_count

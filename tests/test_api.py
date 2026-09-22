@@ -12,7 +12,7 @@ def test_root_endpoint():
     assert resp.status_code == 200
     data = resp.json()
     assert data["service"] == "AgentGuard Backend"
-    assert data["module"] == "Member 2 - Agent Planner & Execution Engine"
+    assert data["module"] == "AgentGuard - Orchestrator & Execution Engine"
 
 
 def test_start_workflow_endpoint():
@@ -76,7 +76,7 @@ def test_external_verify_endpoint():
     wf.current_step = "Build project"
     workflow_store.save(wf)
 
-    # Member 3 posts a PASS verification decision
+    # Verifier posts a PASS verification decision
     verif_payload = {
         "step_id": "step_bld",
         "verification_result": {

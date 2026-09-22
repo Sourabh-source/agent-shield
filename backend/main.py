@@ -2,7 +2,8 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api import status_router, workflow_router
+from backend.api import status_router, workflow_router, metrics_router
+from backend.api.account import account_router
 from backend.config import settings
 from backend.middleware.auth import AuthMiddleware
 from backend.observability import JsonFormatter, ObservabilityMiddleware
@@ -41,16 +42,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include API routers
-app.include_router(workflow_router)
+# Legacy routes (backward compat)
+app.include_router(workflow_router, prefix="/workflow")
+# Versioned routes
+app.include_router(workflow_router, prefix="/v1/workflow")
 app.include_router(status_router)
+app.include_router(metrics_router)
+app.include_router(account_router)
 
 
 @app.get("/")
 def root():
     return {
         "service": "AgentGuard Backend",
-        "module": "Member 2 - Agent Planner & Execution Engine",
+        "module": "AgentGuard - Orchestrator & Execution Engine",
         "status": "healthy",
         "docs_url": "/docs",
         "endpoints": {

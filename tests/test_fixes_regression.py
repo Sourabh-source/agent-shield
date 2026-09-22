@@ -2,7 +2,7 @@
 Regression Test Suite for the 3 Targeted Hardening Fixes:
 1. Fix 1: Explicit Real Verifier vs Mock Verifier Config
 2. Fix 2: Strengthen Workspace Path Containment
-3. Fix 3: Proper Member 3 Verification Callback / Recovery Flow
+3. Fix 3: Proper Verifier Verification Callback / Recovery Flow
 """
 import os
 import tempfile
@@ -235,7 +235,7 @@ def test_fix3_callback_pass_marks_verified_and_continues():
             'step_id': 's1',
             'verification_result': {
                 'verified': True,
-                'reason': 'Artifact validated by Member 3 machine check',
+                'reason': 'Artifact validated by Verifier machine check',
                 'recovery_required': False,
                 'retry_allowed': False,
             }
@@ -258,7 +258,7 @@ def test_fix3_callback_fail_with_recovery_triggers_recovery():
     wf.current_step = 'build'
     workflow_store.save(wf)
 
-    # Member 3 posts verification failure with recovery action
+    # Verifier posts verification failure with recovery action
     resp = client.post(
         f'/workflow/{wf.workflow_id}/verify',
         json={
@@ -396,7 +396,7 @@ def test_fix3_callback_verifier_unavailable_produces_verification_unavailable():
             'step_id': 's1',
             'verification_result': {
                 'verified': False,
-                'reason': 'Connection refused by Member 3 host',
+                'reason': 'Connection refused by Verifier host',
                 'recovery_required': False,
                 'retry_allowed': False,
                 'metadata': {'verifier_unavailable': True},

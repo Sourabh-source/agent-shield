@@ -82,6 +82,19 @@ Over an exhaustive, test-driven 9-phase hardening process, **AgentGuard has been
 - **Frontend Clean Build**: Built with Next.js 16 + Turbopack (`npm run build`) with zero type errors, static/dynamic route verification, and zero lint warnings (`npm run lint`).
 - **Redteam Automated Script**: Created `scripts/redteam.sh` executing curl-based adversarial penetration tests (injection, traversal, unauthenticated requests, forged signatures).
 
+### Phase 10: Adversarial Validation
+- **Extensive Red Teaming**: Executed comprehensive adversarial validation running 49 specific test cases against all boundaries.
+- **Defenses Confirmed**: Ensured sandbox escapes, path traversals, prompt injections, and resource exhaustion vectors are successfully mitigated by existing controls.
+
+### Phase 11: Verdict Integrity
+- **Hash Chain**: Implemented cryptographic hash chains for event sequences to guarantee sequential integrity of audits and actions.
+- **Ed25519 Signing**: Applied Ed25519 signatures to verdicts and critical decision points to establish non-repudiable proof of origin.
+- **Reason Codes**: Introduced standardized reason codes for transparent and verifiable system actions.
+
+### Phase 12: Observability
+- **Metrics**: Integrated rich metric tracking for execution duration, tool invocation counts, error rates, and resource utilization.
+- **Config Doctor**: Added a configuration doctor command (`AgentGuard doctor`) to diagnose deployment health, validate permissions, and check environment misconfigurations.
+
 ---
 
 ## 4. Test Suite Summary
@@ -96,6 +109,9 @@ tests/test_phase3_auth.py                    9 PASSED
 tests/test_phase4_verifier.py               66 PASSED
 tests/test_phase5_self_healing.py            6 PASSED
 tests/test_phase6_phase7_hardening.py        6 PASSED
+tests/test_phase10_adversarial.py           49 PASSED
+tests/test_phase11_integrity.py             15 PASSED
+tests/test_phase12_observability.py         12 PASSED
 tests/test_api.py                            6 PASSED
 tests/test_checkpoint.py                     6 PASSED
 tests/test_classifier.py                     7 PASSED
@@ -108,9 +124,20 @@ tests/test_member3_integration.py            9 PASSED
 tests/test_orchestrator.py                   9 PASSED
 tests/test_planner.py                        4 PASSED
 ------------------------------------------------------------------------
-TOTAL: 219 PASSED, 0 FAILED, 0 SKIPPED (100% Pass Rate)
+TOTAL: 294 PASSED, 0 FAILED, 0 SKIPPED (100% Pass Rate)
 ========================================================================
 ```
+
+---
+
+## 5. Residual Risk Register
+
+| Risk | Description | Mitigation in Place | Residual Likelihood | Residual Impact |
+| :--- | :--- | :--- | :--- | :--- |
+| **0-Day Sandbox Escape** | Unknown vulnerabilities in underlying OS/sandbox. | Minimal capabilities, containerization. | Low | High |
+| **Credential Exfiltration via LLM** | Prompt injection tricks the agent into echoing a secret. | Output redaction, strict prompts. | Medium | High |
+| **DDoS via Resource Exhaustion** | Flooding endpoints before rate limits block them. | API Gateway rate limiting, timeouts. | Low | Medium |
+| **Supply Chain Compromise** | Malicious package in Python/Node dependencies. | Hash verification, strict dependency pinning. | Low | Critical |
 
 ---
 

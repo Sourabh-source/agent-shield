@@ -28,9 +28,21 @@ class JsonFormatter(logging.Formatter):
             "message": redact_secrets(record.getMessage()),
             "correlation_id": cid,
         }
+        if hasattr(record, "workflow_id"):
+            log_entry["workflow_id"] = record.workflow_id
+        if hasattr(record, "step_id"):
+            log_entry["step_id"] = record.step_id
         if record.exc_info:
             log_entry["exception"] = redact_secrets(self.formatException(record.exc_info))
         return json.dumps(log_entry)
+
+
+def log_security_event(message: str, event_type: str, severity: str = "WARNING", **kwargs):
+    """Logs a structured security event."""
+    logger = logging.getLogger("agentguard.security")
+    extra = {"security_event": True, "event_type": event_type, **kwargs}
+    log_func = getattr(logger, severity.lower(), logger.warning)
+    log_func(message, extra=extra)
 
 
 def get_correlation_id() -> str:

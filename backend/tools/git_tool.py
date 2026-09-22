@@ -122,6 +122,8 @@ def clone_repository(
     # Strict URL safety validation
     is_safe, reason = validate_repo_url(safe_url)
     if not is_safe:
+        from backend.metrics import security_violations
+        security_violations.labels(violation_type='ssrf').inc()
         return ExecutionResult(
             workflow_id=workflow_id,
             step="clone_repository",

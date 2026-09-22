@@ -121,7 +121,7 @@ def create_deterministic_plan(
     analysis: Optional[ProjectAnalysis] = None,
 ) -> List[StepDefinition]:
     """
-    Deterministic fallback planner providing a guaranteed valid, structured workflow
+    Deterministic fallback planner providing a reliably valid, structured workflow
     for the MVP project health task.
     """
     steps: List[StepDefinition] = []
@@ -165,9 +165,15 @@ def update_plan_with_analysis(
                 step.command = analysis.install_command or "pip install -r requirements.txt"
                 step.reason = f"Detected Python project with {analysis.package_manager} package manager"
             else:
-                step.tool = "shell"
-                step.command = analysis.install_command or "echo 'No install step required'"
-                step.reason = "Generic project structure; no specific dependency manager detected"
+                if analysis.install_command:
+                    step.tool = "shell"
+                    step.command = analysis.install_command
+                    step.reason = "Generic project structure; generic install command detected"
+                else:
+                    step.tool = "shell"
+                    step.status = StepStatus.NOT_APPLICABLE.value if 'StepStatus' in globals() and hasattr(StepStatus, 'NOT_APPLICABLE') else 'not_applicable'
+                    step.command = None
+                    step.reason = "No install step required for this project type"
             step.description = f"Install dependencies using {analysis.package_manager}"
 
         elif step.type == StepType.BUILD_PROJECT.value:

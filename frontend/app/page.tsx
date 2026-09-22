@@ -362,11 +362,6 @@ export default function DashboardPage() {
                       <td className="py-3 px-4 whitespace-nowrap">
                         <div className="flex items-center gap-2">
                           <StatusBadge status={wf.overall_status} size="xs" />
-                          {wf.demo_failure_mode && (
-                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/60 text-amber-300 border border-amber-800/60">
-                              SIM: {wf.demo_failure_mode}
-                            </span>
-                          )}
                           {wf.dry_run && (
                             <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-950/60 text-purple-300 border border-purple-800/60">
                               DRY RUN

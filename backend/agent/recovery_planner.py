@@ -239,14 +239,16 @@ class RecoveryPlanner:
             resolved_tool = tool_registry.resolve_tool_for_command(suggested_action)
             tool = resolved_tool.name
 
+        action_type = "custom_remediation" if suggested_action else "unrecoverable"
+
         return RecoveryPlan(
             reason=classification.reason,
             failure_type=failure_type,
-            action_type="custom_remediation",
+            action_type=action_type,
             tool=tool,
-            command=suggested_action or "echo 'Executing standard recovery retry'",
+            command=suggested_action or None,
             target_step=target_step,
-            max_attempts=max_attempts,
+            max_attempts=max_attempts if suggested_action else 0,
             postcondition_type="resource_ready",
             postcondition_target=target_step,
         )

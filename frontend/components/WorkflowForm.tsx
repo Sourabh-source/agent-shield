@@ -6,12 +6,6 @@ import type { WorkflowCreateRequest } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import { Play, RotateCw, GitBranch, Terminal, HelpCircle } from "lucide-react";
 
-const DEMO_MODES = [
-  { value: "", label: "Normal Execution (Production Mode — No Failure Injection)" },
-  { value: "missing_dependency", label: "Simulate Missing Dependency (Triggers Self-Healing & Verification)" },
-  { value: "persistent_failure", label: "Simulate Persistent Failure (Triggers Bounded Retry Halt)" },
-];
-
 const PRESET_REPOS = [
   { label: "Hello-World (Python/Generic)", url: "https://github.com/octocat/Hello-World" },
   { label: "Example Node Service", url: "https://github.com/example/broken-dependency-repo" },
@@ -28,7 +22,6 @@ export default function WorkflowForm({ onStarted, onCancel, compact = false }: W
   const [repoUrl, setRepoUrl] = useState("https://github.com/octocat/Hello-World");
   const [task, setTask] = useState("Analyze repository, install dependencies, build, run tests, and verify service readiness.");
   const [dryRun, setDryRun] = useState(false);
-  const [demoMode, setDemoMode] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,7 +34,6 @@ export default function WorkflowForm({ onStarted, onCancel, compact = false }: W
       repo_url: repoUrl.trim(),
       task: task.trim(),
       dry_run: dryRun,
-      demo_failure_mode: demoMode || null,
     };
 
     try {
@@ -117,24 +109,6 @@ export default function WorkflowForm({ onStarted, onCancel, compact = false }: W
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {/* Demo Failure Injection */}
-          <div>
-            <label className="text-xs text-slate-300 block mb-1 font-medium">
-              Demo Simulation Mode
-            </label>
-            <select
-              value={demoMode}
-              onChange={(e) => setDemoMode(e.target.value)}
-              className="w-full bg-[#070b14] border border-slate-700/80 rounded-md px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
-            >
-              {DEMO_MODES.map((m) => (
-                <option key={m.value} value={m.value} className="bg-slate-900 text-slate-200">
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
           {/* Dry Run Toggle */}
           <div className="flex items-center justify-between p-2.5 rounded-md border border-slate-800 bg-[#070b14]">
             <div>

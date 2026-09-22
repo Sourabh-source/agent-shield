@@ -1,5 +1,5 @@
 """
-Integration Boundary Verification Test: Member 2 <-> Member 3 (and Member 1 API access).
+Integration Boundary Verification Test: Orchestrator <-> Verifier (and Frontend API access).
 Tests according to the AgentGuard PRD specifications.
 """
 from typing import List
@@ -35,7 +35,7 @@ def test_integration_boundary_contract_schemas():
         workspace="/test/workspace",
     )
 
-    # Validate Member 2 -> Member 3 payload fields
+    # Validate Orchestrator -> Verifier payload fields
     dumped = exec_res.model_dump()
     assert dumped["workflow_id"] == "wf_boundary_123"
     assert dumped["step"] == "build_project"
@@ -48,7 +48,7 @@ def test_integration_boundary_contract_schemas():
     assert exec_res.actual["exit_code"] == 1
     assert exec_res.expected["exit_code"] == 0
 
-    # Validate Member 3 -> Member 2 payload fields
+    # Validate Verifier -> Orchestrator payload fields
     verif_res = VerificationResult(
         verified=False,
         reason="Missing dependency 'axios'",
@@ -238,7 +238,7 @@ def test_orchestrator_trusts_verifier_over_exit_code():
 
 def test_member1_api_access_without_internal_orchestrator():
     """
-    9: Confirm Member 1 frontend can retrieve workflow status and timeline events
+    9: Confirm Frontend frontend can retrieve workflow status and timeline events
     strictly through the HTTP REST API.
     """
     client = TestClient(app, headers={"X-API-Key": "test-api-key"})

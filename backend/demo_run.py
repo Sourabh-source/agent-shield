@@ -1,5 +1,5 @@
 """
-AgentGuard Demo Runner (Member 2 Backend - Hardened)
+AgentGuard Demo Runner (Orchestrator Backend - Hardened)
 Demonstrates:
 1. Normal successful workflow execution with machine-checked evidence
 2. Failure -> Diagnosis -> Recovery execution -> Retry -> Verified success

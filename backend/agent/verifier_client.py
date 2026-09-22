@@ -6,8 +6,11 @@ import httpx
 
 from backend.config import settings
 from backend.models.workflow import ExecutionResult, StepType, VerificationResult
+from backend.models.reason_codes import ReasonCode
 
 logger = logging.getLogger("agentguard.verifier_client")
+
+VERIFIER_VERSION = "2.0.0"
 
 
 class VerificationClient(abc.ABC):
@@ -35,12 +38,14 @@ class DeterministicEvidenceVerifier(VerificationClient):
     def verify(self, execution_result: ExecutionResult) -> VerificationResult:
         result = self._evaluate(execution_result)
         if execution_result:
-            if not result.execution_id and getattr(execution_result, "execution_id", None):
+            if not result.execution_id and getattr(execution_result, 'execution_id', None):
                 result.execution_id = execution_result.execution_id
-            if not result.evidence_digest and getattr(execution_result, "evidence_digest", None):
+            if not result.evidence_digest and getattr(execution_result, 'evidence_digest', None):
                 result.evidence_digest = execution_result.evidence_digest
+        if not result.metadata:
+            result.metadata = {}
+        result.metadata['verifier_version'] = VERIFIER_VERSION
         return result
-
     def _evaluate(self, execution_result: ExecutionResult) -> VerificationResult:
         # ----------------------------------------------------
         # A. Structural Evidence Integrity Checks
@@ -52,7 +57,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 reason="Verification failed: execution result is empty",
                 recovery_required=False,
                 retry_allowed=False,
-            )
+            
+            reason_code=ReasonCode.UNKNOWN,)
 
         if not execution_result.execution_id:
             return VerificationResult(
@@ -61,7 +67,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 reason="Verification failed: missing execution ID in evidence",
                 recovery_required=False,
                 retry_allowed=False,
-            )
+            
+            reason_code=ReasonCode.UNKNOWN,)
 
         if not execution_result.timestamp:
             return VerificationResult(
@@ -70,7 +77,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 reason="Verification failed: missing timestamp in evidence",
                 recovery_required=False,
                 retry_allowed=False,
-            )
+            
+            reason_code=ReasonCode.UNKNOWN,)
 
         if execution_result.exit_code is None:
             return VerificationResult(
@@ -79,7 +87,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 reason="Verification failed: exit code not captured",
                 recovery_required=False,
                 retry_allowed=False,
-            )
+            
+            reason_code=ReasonCode.UNKNOWN,)
 
         metadata = execution_result.metadata or {}
         if metadata.get("reject") or metadata.get("security_issue") or metadata.get("evidence_invalid") or metadata.get("security_blocked"):
@@ -90,7 +99,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 recovery_required=False,
                 retry_allowed=False,
                 metadata=metadata,
-            )
+            
+            reason_code=ReasonCode.SECURITY_BLOCKED,)
 
         stdout = execution_result.stdout or ""
         stderr = execution_result.stderr or ""
@@ -142,7 +152,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="echo 'Killing conflicting process'",
                     retry_allowed=True,
                     failure_type="PORT_ERROR",
-                )
+                
+            reason_code=ReasonCode.PORT_CONFLICT,)
 
             # 2. Python missing module check
             py_missing_mod = re.search(r"No module named ['\"]?([a-zA-Z0-9_\-]+)['\"]?", combined_logs)
@@ -156,7 +167,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action=f"pip install {module}",
                     retry_allowed=True,
                     failure_type="DEPENDENCY_ERROR",
-                )
+                
+            reason_code=ReasonCode.DEPENDENCY_ERROR,)
 
             # 3. Node missing module check
             npm_missing_mod = re.search(r"Cannot find module ['\"]?([a-zA-Z0-9_\-\/@]+)['\"]?", combined_logs)
@@ -171,7 +183,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action=f"npm install {pkg}",
                     retry_allowed=True,
                     failure_type="DEPENDENCY_ERROR",
-                )
+                
+            reason_code=ReasonCode.DEPENDENCY_ERROR,)
             if missing_pkg:
                 pkg = missing_pkg.group(1)
                 return VerificationResult(
@@ -182,7 +195,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action=f"npm install {pkg}",
                     retry_allowed=True,
                     failure_type="DEPENDENCY_ERROR",
-                )
+                
+            reason_code=ReasonCode.DEPENDENCY_ERROR,)
 
             # 4. Timeout
             if execution_result.exit_code == 124 or "timed out" in combined_lower or "timeout" in combined_lower:
@@ -194,7 +208,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="echo 'Retrying with extended timeout'",
                     retry_allowed=True,
                     failure_type="TIMEOUT",
-                )
+                
+            reason_code=ReasonCode.TIMEOUT,)
 
             # 5. Dependency errors (resolution / checksum / 404)
             if any(e in combined_lower for e in ["resolutionimpossible", "no matching distribution", "eresolve", "econflict", "eintegrity", "could not find a version"]):
@@ -206,7 +221,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="pip install --upgrade pip",
                     retry_allowed=True,
                     failure_type="DEPENDENCY_ERROR",
-                )
+                
+            reason_code=ReasonCode.DEPENDENCY_ERROR,)
 
             # 6. Build / Syntax error
             if any(e in combined_lower for e in ["syntaxerror", "indentationerror", "error ts", "compilation failed", "failed to compile", "error[e", "error: expected"]):
@@ -218,7 +234,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="pip install -r requirements.txt",
                     retry_allowed=True,
                     failure_type="BUILD_ERROR",
-                )
+                
+            reason_code=ReasonCode.BUILD_ERROR_DETECTED,)
 
             # 7. StepType-based failure classification
             if step_type == StepType.RUN_TESTS.value:
@@ -230,7 +247,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="pip install pytest",
                     retry_allowed=True,
                     failure_type="TEST_FAILURE",
-                )
+                
+            reason_code=ReasonCode.EXIT_NONZERO,)
             elif step_type == StepType.INSTALL_DEPENDENCIES.value:
                 return VerificationResult(
                     verified=False,
@@ -240,7 +258,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="pip install --upgrade pip",
                     retry_allowed=True,
                     failure_type="DEPENDENCY_ERROR",
-                )
+                
+            reason_code=ReasonCode.DEPENDENCY_ERROR,)
             elif step_type == StepType.BUILD_PROJECT.value:
                 return VerificationResult(
                     verified=False,
@@ -250,7 +269,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="pip install -r requirements.txt",
                     retry_allowed=True,
                     failure_type="BUILD_ERROR",
-                )
+                
+            reason_code=ReasonCode.BUILD_ERROR_DETECTED,)
             elif step_type == StepType.HEALTH_CHECK.value:
                 return VerificationResult(
                     verified=False,
@@ -260,7 +280,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="echo 'Waiting for service readiness'",
                     retry_allowed=True,
                     failure_type="NETWORK_ERROR",
-                )
+                
+            reason_code=ReasonCode.HEALTH_CHECK_FAILED,)
             elif step_type == StepType.CLONE_REPOSITORY.value:
                 return VerificationResult(
                     verified=False,
@@ -269,7 +290,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_required=False,
                     retry_allowed=False,
                     failure_type="REPOSITORY_ERROR",
-                )
+                
+            reason_code=ReasonCode.CLONE_FAILED,)
 
             return VerificationResult(
                 verified=False,
@@ -279,7 +301,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 recovery_action="echo 'Attempting automatic workspace cleanup'",
                 retry_allowed=True,
                 failure_type="UNKNOWN_ERROR",
-            )
+            
+            reason_code=ReasonCode.UNKNOWN,)
 
         # ----------------------------------------------------
         # C. Exit Code 0: Required Evidence Contracts per StepType
@@ -306,7 +329,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="pip install pytest",
                     retry_allowed=True,
                     failure_type="TEST_FAILURE",
-                )
+                
+            reason_code=ReasonCode.ZERO_TESTS_COLLECTED,)
 
             # Check 2: Fatal test failure patterns (even if exit code was 0 due to pipe or suppression)
             fatal_test_errors = [
@@ -331,7 +355,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                         recovery_action="pip install pytest",
                         retry_allowed=True,
                         failure_type="TEST_FAILURE",
-                    )
+                    
+            reason_code=ReasonCode.PIPE_SUPPRESSED_FAILURE,)
 
             if not combined_logs.strip():
                 return VerificationResult(
@@ -342,14 +367,16 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="pip install pytest",
                     retry_allowed=True,
                     failure_type="TEST_FAILURE",
-                )
+                
+            reason_code=ReasonCode.EXIT_NONZERO,)
 
             return VerificationResult(
                 verified=True,
                 status="VERIFIED",
                 reason="Tests verified: test execution completed successfully without failures",
                 recovery_required=False,
-            )
+            
+            reason_code=ReasonCode.EXIT_ZERO_CLEAN,)
 
         # 2. INSTALL_DEPENDENCIES
         if step_type == StepType.INSTALL_DEPENDENCIES.value:
@@ -376,13 +403,15 @@ class DeterministicEvidenceVerifier(VerificationClient):
                         recovery_action="pip install --upgrade pip",
                         retry_allowed=True,
                         failure_type="DEPENDENCY_ERROR",
-                    )
+                    
+            reason_code=ReasonCode.DEPENDENCY_ERROR,)
             return VerificationResult(
                 verified=True,
                 status="VERIFIED",
                 reason="Dependency installation verified: exit code 0 with clean package manager output",
                 recovery_required=False,
-            )
+            
+            reason_code=ReasonCode.EXIT_ZERO_CLEAN,)
 
         # 3. BUILD_PROJECT
         if step_type == StepType.BUILD_PROJECT.value:
@@ -408,13 +437,15 @@ class DeterministicEvidenceVerifier(VerificationClient):
                         recovery_action="pip install -r requirements.txt",
                         retry_allowed=True,
                         failure_type="BUILD_ERROR",
-                    )
+                    
+            reason_code=ReasonCode.BUILD_ERROR_DETECTED,)
             return VerificationResult(
                 verified=True,
                 status="VERIFIED",
                 reason="Build verified: clean compilation with exit code 0",
                 recovery_required=False,
-            )
+            
+            reason_code=ReasonCode.EXIT_ZERO_CLEAN,)
 
         # 4. HEALTH_CHECK
         if step_type == StepType.HEALTH_CHECK.value:
@@ -428,7 +459,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="echo 'Restarting service'",
                     retry_allowed=True,
                     failure_type="NETWORK_ERROR",
-                )
+                
+            reason_code=ReasonCode.HEALTH_CHECK_FAILED,)
             if any(e in combined_lower for e in ["connection refused", "404 not found", "500 internal", "502 bad", "503 service", "name or service not known", "timeout"]):
                 return VerificationResult(
                     verified=False,
@@ -438,13 +470,15 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="echo 'Waiting for service readiness'",
                     retry_allowed=True,
                     failure_type="NETWORK_ERROR",
-                )
+                
+            reason_code=ReasonCode.HEALTH_CHECK_FAILED,)
             return VerificationResult(
                 verified=True,
                 status="VERIFIED",
                 reason="Health check verified: endpoint responded successfully with valid HTTP status",
                 recovery_required=False,
-            )
+            
+            reason_code=ReasonCode.EXIT_ZERO_CLEAN,)
 
         # 5. START_APPLICATION
         if step_type == StepType.START_APPLICATION.value:
@@ -457,14 +491,16 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_action="echo 'Killing conflicting process'",
                     retry_allowed=True,
                     failure_type="PORT_ERROR",
-                )
+                
+            reason_code=ReasonCode.PORT_CONFLICT,)
             pid = metadata.get("pid")
             return VerificationResult(
                 verified=True,
                 status="VERIFIED",
                 reason=f"Application startup verified: process running (PID: {pid})" if pid else "Application startup verified: process started successfully",
                 recovery_required=False,
-            )
+            
+            reason_code=ReasonCode.UNKNOWN,)
 
         # 6. CLONE_REPOSITORY
         if step_type == StepType.CLONE_REPOSITORY.value:
@@ -477,7 +513,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_required=False,
                     retry_allowed=False,
                     failure_type="REPOSITORY_ERROR",
-                )
+                
+            reason_code=ReasonCode.CLONE_EMPTY,)
             if any(f in stderr.lower() for f in ["fatal: repository", "authentication failed"]):
                 return VerificationResult(
                     verified=False,
@@ -486,13 +523,15 @@ class DeterministicEvidenceVerifier(VerificationClient):
                     recovery_required=False,
                     retry_allowed=False,
                     failure_type="REPOSITORY_ERROR",
-                )
+                
+            reason_code=ReasonCode.CLONE_FAILED,)
             return VerificationResult(
                 verified=True,
                 status="VERIFIED",
                 reason=f"Repository clone verified: files present in workspace" if cloned_count is None else f"Repository clone verified: {cloned_count} files present in workspace",
                 recovery_required=False,
-            )
+            
+            reason_code=ReasonCode.EXIT_ZERO_CLEAN,)
 
         # 7. ANALYZE_PROJECT & FINAL_REPORT
         if step_type in (StepType.ANALYZE_PROJECT.value, StepType.FINAL_REPORT.value):
@@ -502,7 +541,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
                 reason=f"Step '{execution_result.step}' passed machine-checked evidence verification",
                 recovery_required=False,
                 retry_allowed=True,
-            )
+            
+            reason_code=ReasonCode.EXIT_ZERO_CLEAN,)
 
         # 8. Unknown / Unverified Step Type: Tri-state UNVERIFIABLE
         return VerificationResult(
@@ -511,7 +551,8 @@ class DeterministicEvidenceVerifier(VerificationClient):
             reason=f"Step '{execution_result.step}' has step_type '{step_type}': no machine-evidence verification rules defined.",
             recovery_required=False,
             retry_allowed=True,
-        )
+        
+            reason_code=ReasonCode.STEP_UNVERIFIABLE,)
 
 
 class MockVerifierClient(DeterministicEvidenceVerifier):
@@ -533,7 +574,8 @@ class HttpVerifierClient(VerificationClient):
                 response = client.post(self.endpoint_url, json=payload)
                 response.raise_for_status()
                 data = response.json()
-                return VerificationResult(**data)
+                return VerificationResult(**data,
+            reason_code=ReasonCode.UNKNOWN)
         except Exception as e:
             logger.error(f"Failed to verify with external verifier: {e}")
             return VerificationResult(
@@ -544,7 +586,8 @@ class HttpVerifierClient(VerificationClient):
                 recovery_action="echo 'Waiting for external verifier availability'",
                 retry_allowed=False,
                 metadata={"verifier_unavailable": True, "service_unavailable": True},
-            )
+            
+            reason_code=ReasonCode.SERVICE_UNAVAILABLE,)
 
 
 class UnavailableVerifierClient(VerificationClient):
@@ -558,7 +601,8 @@ class UnavailableVerifierClient(VerificationClient):
             recovery_required=False,
             retry_allowed=False,
             metadata={"verifier_unavailable": True, "service_unavailable": True},
-        )
+        
+            reason_code=ReasonCode.SERVICE_UNAVAILABLE,)
 
 
 def get_verifier_client() -> VerificationClient:

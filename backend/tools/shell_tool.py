@@ -260,6 +260,8 @@ def execute_shell_command(
 
     safe, reason, parsed_commands = validate_and_parse_command(cmd_str, cwd=cwd)
     if not safe:
+        from backend.metrics import security_violations
+        security_violations.labels(violation_type='command_injection').inc()
         return ExecutionResult(
             workflow_id=workflow_id,
             step=step_name,

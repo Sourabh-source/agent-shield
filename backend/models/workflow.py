@@ -133,7 +133,7 @@ class RecoveryAttempt(BaseModel):
     timestamp: str = Field(default_factory=current_iso_time)
 
 
-# Hand-off models between Member 2, Member 3, and Member 1
+# Hand-off models between Orchestrator, Verifier, and Frontend
 
 class EvidenceType(str, Enum):
     EXECUTION_OUTPUT = "EXECUTION_OUTPUT"
@@ -158,7 +158,7 @@ class EvidenceRecord(BaseModel):
 
 class ExecutionResult(BaseModel):
     """
-    Standardized execution output sent from Member 2 to Member 3's Evidence Engine.
+    Standardized execution output sent from Orchestrator to the Verifier's Evidence Engine.
     Captures raw observable evidence from real command execution.
     """
     workflow_id: str
@@ -225,12 +225,13 @@ def create_evidence_record(
 
 class VerificationResult(BaseModel):
     """
-    Standardized verification decision received by Member 2 from Member 3.
+    Standardized verification decision received by Orchestrator from Verifier.
     Supports tri-state status: VERIFIED, FAILED, UNVERIFIABLE.
     """
     verified: bool
     status: str = Field(default="VERIFIED")
     reason: Optional[str] = None
+    reason_code: Optional[str] = None
     recovery_required: bool = False
     recovery_action: Optional[str] = None
     retry_allowed: bool = True
@@ -251,7 +252,7 @@ class VerificationResult(BaseModel):
 
 class WorkflowEvent(BaseModel):
     """
-    Standardized event schema sent to Member 1's Frontend.
+    Standardized event schema sent to Frontend.
     """
     workflow_id: str
     event_type: str
@@ -303,8 +304,6 @@ class WorkflowCreateRequest(BaseModel):
     dry_run: bool = False
 
 
-class InternalWorkflowCreateRequest(WorkflowCreateRequest):
-    demo_failure_mode: Optional[str] = None
 
 
 class WorkflowCreateResponse(BaseModel):
@@ -326,7 +325,6 @@ class WorkflowState(BaseModel):
     verification_status: Optional[str] = None
     final_result: Optional[str] = None
     dry_run: bool = False
-    demo_failure_mode: Optional[str] = None
     owner_id: Optional[str] = "default-owner"
     recovery_history: List[RecoveryAttempt] = Field(default_factory=list)
     metrics: Dict[str, Any] = Field(default_factory=dict)
@@ -340,7 +338,7 @@ class ExecuteStepRequest(BaseModel):
 
 class VerifyStepRequest(BaseModel):
     """
-    Used when external Member 3 posts verification results directly to the workflow API.
+    Used when external Verifier posts verification results directly to the workflow API.
     """
     step_id: Optional[str] = None
     verification_result: VerificationResult

@@ -1,0 +1,20 @@
+from enum import Enum
+
+class ReasonCode(str, Enum):
+    ZERO_TESTS_COLLECTED = "zero_tests_collected"
+    EXIT_NONZERO = "exit_nonzero"
+    EXIT_ZERO_CLEAN = "exit_zero_clean"
+    PIPE_SUPPRESSED_FAILURE = "pipe_suppressed_failure"
+    TIMEOUT = "timeout"
+    SECURITY_BLOCKED = "security_blocked"
+    BUILD_ERROR_DETECTED = "build_error_detected"
+    DEPENDENCY_ERROR = "dependency_error"
+    PORT_CONFLICT = "port_conflict"
+    SERVICE_UNAVAILABLE = "service_unavailable"
+    STEP_NOT_APPLICABLE = "step_not_applicable"
+    STEP_UNVERIFIABLE = "step_unverifiable"
+    CLONE_FAILED = "clone_failed"
+    CLONE_EMPTY = "clone_empty"
+    HEALTH_CHECK_FAILED = "health_check_failed"
+    HEALTH_CHECK_PASSED = "health_check_passed"
+    UNKNOWN = "unknown"

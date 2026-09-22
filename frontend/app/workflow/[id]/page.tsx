@@ -219,11 +219,6 @@ export default function WorkflowDetailPage() {
                   DRY RUN
                 </span>
               )}
-              {workflow.demo_failure_mode && (
-                <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-amber-950/60 border border-amber-800/80 text-amber-300">
-                  SIMULATION: {workflow.demo_failure_mode}
-                </span>
-              )}
             </div>
 
             <div className="flex items-center gap-2 text-white text-base font-semibold tracking-tight">

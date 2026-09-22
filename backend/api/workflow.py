@@ -16,8 +16,12 @@ from backend.models.workflow import (
     WorkflowStatus,
 )
 
+from typing import Dict, Optional
+
 logger = logging.getLogger("agentguard.api.workflow")
-router = APIRouter(prefix="/workflow", tags=["workflow"])
+router = APIRouter(tags=["workflow"])
+
+_idempotency_cache: Dict[str, str] = {}  # key -> workflow_id
 
 
 def verify_workflow_ownership(workflow: WorkflowState, request: Request, workflow_id: str):
@@ -36,11 +40,21 @@ def start_workflow(
     payload: WorkflowCreateRequest,
     background_tasks: BackgroundTasks,
     request: Request,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ) -> WorkflowCreateResponse:
     """
     Initializes a new workflow for a Git repository and starts orchestrator in the background.
     Binds the workflow to the authenticated tenant owner.
     """
+    if idempotency_key and idempotency_key in _idempotency_cache:
+        existing_id = _idempotency_cache[idempotency_key]
+        existing_wf = workflow_store.get(existing_id)
+        if existing_wf:
+            return WorkflowCreateResponse(
+                workflow_id=existing_wf.workflow_id,
+                status=existing_wf.overall_status,
+            )
+
     repo_url = payload.repo_url.strip()
     if not repo_url:
         raise HTTPException(
@@ -55,16 +69,17 @@ def start_workflow(
         )
 
     owner_id = getattr(request.state, "owner_id", "default-owner")
-    demo_mode = getattr(payload, "demo_failure_mode", None)
 
     orchestrator = WorkflowOrchestrator()
     workflow = orchestrator.create_workflow(
         repo_url=repo_url,
         task=payload.task.strip(),
         dry_run=payload.dry_run,
-        demo_failure_mode=demo_mode,
         owner_id=owner_id,
     )
+
+    if idempotency_key:
+        _idempotency_cache[idempotency_key] = workflow.workflow_id
 
     # Launch execution loop in background
     background_tasks.add_task(orchestrator.run_workflow, workflow.workflow_id)

@@ -11,7 +11,6 @@ export interface WorkflowCreateRequest {
   repo_url: string;
   task: string;
   dry_run: boolean;
-  demo_failure_mode?: string | null;
 }
 
 export interface WorkflowCreateResponse {
@@ -114,7 +113,6 @@ export interface WorkflowState {
   verification_status?: string;
   final_result?: string;
   dry_run: boolean;
-  demo_failure_mode?: string;
   recovery_history: RecoveryAttempt[];
   metrics: Record<string, unknown>;
   created_at: string;

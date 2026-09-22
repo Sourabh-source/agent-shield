@@ -17,7 +17,7 @@ EXECUTE (Sandboxed Subprocess Runner / Tool Registry)
 COLLECT MACHINE EVIDENCE (Exit Code, Stdout, Stderr, Digest, FS Snapshot Diff)
   │
   ▼
-TAMPER-EVIDENT VERIFICATION GATE (Member 3 Boundary)
+TAMPER-EVIDENT VERIFICATION GATE (Verifier Boundary)
   ├── PASS  ──► Checkpoint SQLite State ──► Next Step
   └── FAIL  ──► CLASSIFY FAILURE (Typed Category + Source Evidence)
                   │
@@ -34,22 +34,22 @@ TAMPER-EVIDENT VERIFICATION GATE (Member 3 Boundary)
                 RE-VERIFY (Evidence Gate: Never Trust Exit Code Alone)
 ```
 
-### Member 1: Modern DevOps Frontend (Next.js 16 / React 19 / TypeScript / Tailwind)
+### Frontend: Modern DevOps Frontend (Next.js 16 / React 19 / TypeScript / Tailwind)
 - **Workflow Control**: Target Git repository input, task specification, dry-run simulation mode, and live demo failure injection.
 - **Real-Time Execution Timeline**: Sub-second polling with phase badges (`PENDING`, `RUNNING`, `RECOVERING`, `VERIFYING`, `VERIFIED_SUCCESS`, `NOT_APPLICABLE`, `FAILED`).
 - **Cryptographic Evidence Panel**: Inspects raw subprocess commands, exit codes, execution IDs, timestamps, and deterministic SHA-256 `evidence_digest`.
 - **Self-Healing Visualization**: Live inspection of failure classification, structured recovery plans, recovery actions, and bounded retry counters.
 - **Executive Verdict**: Unambiguous terminal verdict directly from backend authority (`VERIFIED SUCCESS`, `VERIFIED FAILURE`, `VERIFICATION UNAVAILABLE`, `BUDGET EXCEEDED`, `CANCELLED`).
 
-### Member 2: Orchestration, Planning, Execution & Storage (FastAPI / Python)
+### Orchestrator: Orchestration, Planning, Execution & Storage (FastAPI / Python)
 - **Validation Gate & AI Planner**: Dynamic Gemini LLM planning with deterministic fallback; validates every step against tool registry schemas.
 - **Tool Sandbox**: Specialized runners for Git, Shell, Python, Pip, Npm, HTTP health checks, and Workspace File operations with path containment.
 - **Closed-Loop Orchestrator**: Enforces verification preconditions, bounds retries (`max_retries=2`), limits recovery actions, tracks execution budgets, and guards concurrent runs with execution mutexes.
 - **Filesystem Snapshotting**: Lightweight before/after workspace filesystem diffing tracking created, modified, and deleted files per step.
-- **Process Lifecycle Guard**: Tracks spawned process trees and guarantees termination (`taskkill /F /T` on Windows, signal groups on POSIX) on cancellation or failure.
+- **Process Lifecycle Guard**: Tracks spawned process trees and ensures termination (`taskkill /F /T` on Windows, signal groups on POSIX) on cancellation or failure.
 - **Hardened SQLite Checkpoints**: Persistent storage configured with Write-Ahead Logging (`WAL`), 5000ms busy timeout, foreign key indexes, and pagination support.
 
-### Member 3: Tamper-Evident Evidence Verification Engine
+### Verifier: Tamper-Evident Evidence Verification Engine
 - **Deterministic SHA-256 Digest**: Raw execution evidence (`stdout`, `stderr`, `exit_code`, `step`, `command`) is cryptographically bound into an `evidence_digest`.
 - **Strict Verification Gate**: `/workflow/{id}/verify` rejects replayed tokens on already verified steps (409), mismatched execution IDs (409), mismatched evidence digests (409), and cancelled workflows (409).
 - **Mutual Authentication**: Protected by `X-AgentGuard-Verify-Token` header authentication.
@@ -57,15 +57,15 @@ TAMPER-EVIDENT VERIFICATION GATE (Member 3 Boundary)
 
 ---
 
-## 🛡️ Production Hardening & Security Guarantees
+## 🛡️ Production Hardening & Security Measures
 
-| Security & Reliability Control | Implementation Detail | Guarantee |
+| Security & Reliability Control | Implementation Detail | Expected Outcome |
 | :--- | :--- | :--- |
 | **Evidence Tamper-Proofing** | SHA-256 digest computed across stdout, stderr, exit code, and command. | Verifier decisions cannot be forged or replayed against stale executions. |
 | **Host Secret Isolation** | Subprocess environment blocks `GEMINI_`, `AWS_`, `GITHUB_`, `SECRET_`, `TOKEN_`, `KEY_`. | Child processes and untrusted build scripts cannot exfiltrate host credentials. |
 | **Cloud SSRF Protection** | HTTP tool blocks cloud instance metadata endpoints (`169.254.169.254`, `metadata.google.internal`). | Repositories cannot execute SSRF probes against infrastructure metadata services. |
 | **Git Injection Prevention** | Git clone validates repository URLs against argument injection (`--upload-pack`) and metacharacters. | Untrusted repo URLs cannot hijack `git` subprocess commands. |
-| **Process Tree Isolation** | Background processes tracked in `_spawned_pids` and killed via process tree termination. | Long-running servers or orphaned zombie processes are guaranteed killed on exit/cancel. |
+| **Process Tree Isolation** | Background processes tracked in `_spawned_pids` and killed via process tree termination. | Long-running servers or orphaned zombie processes are strictly terminated on exit/cancel. |
 | **Bounded Snapshots** | Workspace diffs cap inspection to 1000 files and 5 depth levels; diffs cap at 50 changes. | Prevents high memory consumption or filesystem thrashing on large repositories. |
 | **Execution Mutex** | Orchestrator tracks `_running_workflows` under an internal execution lock. | Prevents race conditions or duplicate concurrent executions of the same workflow. |
 | **Secret Redaction** | Comprehensive regex masks API keys, bearer tokens, passwords, and private keys in logs and UI. | Sensitive strings never appear in stdout, stderr, database records, or event feeds. |
@@ -110,7 +110,7 @@ npm run dev
 ```
 - Web Application: [http://localhost:3000](http://localhost:3000)
 
-### 3. Run Full Automated Test Suite (117/117 Passing)
+### 3. Run Full Automated Test Suite (287+ Passing)
 ```powershell
 .\.venv\Scripts\pytest -v
 ```
@@ -155,7 +155,7 @@ MAX_WORKFLOW_TIME=600
 # Verifier configuration:
 MOCK_VERIFIER=true
 
-# Optional: Shared secret token for Member 3 verification gate (Header: X-AgentGuard-Verify-Token)
+# Optional: Shared secret token for Verifier verification gate (Header: X-AgentGuard-Verify-Token)
 VERIFY_TOKEN=
 
 # Require cryptographic evidence digest on all verification results (default: true)
@@ -169,9 +169,21 @@ NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 
 ---
 
+## 🔒 Security
+
+For detailed security information and our full threat model analysis, please see our [Security Guide](SECURITY.md) and [Security Review](SECURITY_REVIEW.md).
+
+---
+
+## ⚠️ Known Limitations
+
+AgentGuard is a prototype system that runs subprocesses locally and relies on an MVP verifier implementation. For a full breakdown of current operational and security limitations, please review [LIMITATIONS.md](LIMITATIONS.md).
+
+---
+
 ## 🧪 Testing Summary
 
-- **Total Automated Pytest Tests**: **117 passing** (0 failures, 0 regressions)
+- **Total Automated Pytest Tests**: **287+ passing** (0 failures, 0 regressions)
   - Unit tests for all tool sandboxes (Shell, Git, HTTP, File, Python, Pip)
   - Path traversal & command injection security tests
   - SSRF protection tests against cloud instance metadata services
@@ -180,7 +192,7 @@ NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
   - Real subprocess failure injection & recovery execution
   - Process tree termination on Windows/POSIX
   - SQLite WAL mode, pagination, and cascade deletion
-  - Full API integration & Member 1 / Member 3 contract compliance
+  - Full API integration & Frontend / Verifier contract compliance
 - **Frontend Code Quality**:
   - `npm run lint`: **0 errors, 0 warnings**
   - `npm run build`: **Turbopack production build succeeded**

@@ -217,7 +217,7 @@ def test_idempotent_recovery_skips_existing_dependency():
 def test_verifier_says_fail_despite_exit_code_zero():
     """
     Case 18 & 24: CRITICAL SECURITY INVARIANT.
-    Command returns exit_code=0, but Member 3 Verifier rejects the evidence.
+    Command returns exit_code=0, but the Verifier rejects the evidence.
     Orchestrator MUST NOT produce SUCCESS.
     """
     class SecurityRejectingVerifier(VerificationClient):
@@ -249,7 +249,7 @@ def test_verifier_says_fail_despite_exit_code_zero():
 
 
 def test_verifier_service_unavailable_handled_safely():
-    """Case 16: If Member 3 service is down, transitions to VERIFICATION_UNAVAILABLE."""
+    """Case 16: If Verifier service is down, transitions to VERIFICATION_UNAVAILABLE."""
     # Point HttpVerifierClient to unreachable port
     unreachable_client = HttpVerifierClient("http://127.0.0.1:59998/verify")
     orchestrator = WorkflowOrchestrator(verifier_client=unreachable_client)
