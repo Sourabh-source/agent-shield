@@ -29,6 +29,7 @@ try:
         REQUIRE_EVIDENCE_DIGEST: bool = Field(default=False)
         REQUIRE_AUTH: bool = Field(default=True)
         RATE_LIMIT_PER_MINUTE: int = Field(default=60)
+        DEMO_FIXTURES_ENABLED: bool = Field(default=False)
         API_KEYS: Dict[str, str] = Field(
             default={
                 "test-api-key": "default-owner",
@@ -74,6 +75,7 @@ except ImportError:
             self.REQUIRE_EVIDENCE_DIGEST: bool = os.getenv("REQUIRE_EVIDENCE_DIGEST", "false").lower() in ("true", "1", "yes")
             self.REQUIRE_AUTH: bool = os.getenv("REQUIRE_AUTH", "true").lower() in ("true", "1", "yes")
             self.RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
+            self.DEMO_FIXTURES_ENABLED: bool = os.getenv("DEMO_FIXTURES_ENABLED", "false").lower() in ("true", "1", "yes")
             self.API_KEYS: Dict[str, str] = {
                 "test-api-key": "default-owner",
                 "tenant-a-secret-key-12345": "tenant-a",

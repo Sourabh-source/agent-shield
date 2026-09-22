@@ -388,6 +388,21 @@ class WorkflowOrchestrator:
 
         workflow_start_time = time.perf_counter()
 
+        # Demo fixture interception: deterministic workflow for hackathon demos
+        if settings.DEMO_FIXTURES_ENABLED:
+            from backend.demo.demo_fixtures import is_demo_repository, run_demo_workflow
+            if is_demo_repository(workflow.repository):
+                try:
+                    result = run_demo_workflow(self, workflow)
+                    active_workflows.dec()
+                    workflow_total.labels(status=result.overall_status.value).inc()
+                    workflow_duration_seconds.observe(time.perf_counter() - workflow_start_time)
+                    return result
+                finally:
+                    with self._run_lock:
+                        self._running_workflows.discard(workflow_id)
+
+
         # Check if workflow was cancelled
         if workflow.overall_status in [WorkflowStatus.CANCEL_REQUESTED, WorkflowStatus.CANCELLED]:
             workflow.overall_status = WorkflowStatus.CANCELLED
