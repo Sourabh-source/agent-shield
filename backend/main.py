@@ -17,6 +17,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agentguard.main")
 
+# Log demo fixture status at startup
+if getattr(settings, "DEMO_FIXTURES_ENABLED", False):
+    logger.warning("[DEMO] DEMO_FIXTURES_ENABLED=true")
+    logger.warning("[DEMO] Demo fixtures ENABLED — flask-hello-world fixture is active")
+else:
+    logger.info("[DEMO] Demo fixtures disabled (default)")
+
 app = FastAPI(
     title="AgentGuard Backend",
     description=(

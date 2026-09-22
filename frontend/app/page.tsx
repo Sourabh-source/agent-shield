@@ -329,7 +329,7 @@ export default function DashboardPage() {
               <tbody className="divide-y divide-slate-800/60 font-mono text-slate-300">
                 {filteredWorkflows.map((wf) => {
                   const completedSteps = (wf.steps || []).filter((s) =>
-                    ["SUCCESS", "VERIFIED_SUCCESS"].includes(s.status)
+                    ["SUCCESS", "VERIFIED_SUCCESS", "NOT_APPLICABLE", "PARTIALLY_SATISFIED"].includes(s.status)
                   ).length;
                   const repoClean = (wf.repository || "").replace("https://github.com/", "");
                   const durationStr = getWorkflowDuration(wf);

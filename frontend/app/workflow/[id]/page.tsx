@@ -167,7 +167,7 @@ export default function WorkflowDetailPage() {
   const canResume = workflow.overall_status === "CANCELLED";
 
   const completedSteps = workflow.steps.filter((s) =>
-    ["SUCCESS", "VERIFIED_SUCCESS"].includes(s.status)
+    ["SUCCESS", "VERIFIED_SUCCESS", "NOT_APPLICABLE", "PARTIALLY_SATISFIED"].includes(s.status)
   ).length;
   const progressPct =
     workflow.steps.length > 0

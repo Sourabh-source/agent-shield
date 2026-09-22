@@ -220,6 +220,7 @@ export const api = {
 
 export const TERMINAL_STATUSES = new Set([
   "COMPLETED",
+  "VERIFIED_SUCCESS",
   "VERIFIED_FAILURE",
   "VERIFICATION_UNAVAILABLE",
   "CANCELLED",

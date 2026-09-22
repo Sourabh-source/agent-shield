@@ -226,7 +226,7 @@ export default function WorkflowsHistoryPage() {
               <tbody className="divide-y divide-slate-800/60 text-slate-300">
                 {filtered.map((wf) => {
                   const completed = (wf.steps || []).filter((s) =>
-                    ["SUCCESS", "VERIFIED_SUCCESS"].includes(s.status)
+                    ["SUCCESS", "VERIFIED_SUCCESS", "NOT_APPLICABLE", "PARTIALLY_SATISFIED"].includes(s.status)
                   ).length;
                   const durationStr = getWorkflowDuration(wf);
 

@@ -177,6 +177,11 @@ class WorkflowOrchestrator:
             dry_run=dry_run,
             owner_id=owner_id or "default-owner",
         )
+        if getattr(settings, "DEMO_FIXTURES_ENABLED", False):
+            from backend.demo.demo_fixtures import is_demo_repository, _build_step_definitions
+            if is_demo_repository(repo_url):
+                state.steps = _build_step_definitions()
+                logger.warning(f"[DEMO] Matched flask-hello-world fixture: pre-populated {len(state.steps)} demo steps")
         self.emit_event(
             state,
             EventType.WORKFLOW_STARTED,
@@ -389,11 +394,17 @@ class WorkflowOrchestrator:
         workflow_start_time = time.perf_counter()
 
         # Demo fixture interception: deterministic workflow for hackathon demos
-        if settings.DEMO_FIXTURES_ENABLED:
+        if getattr(settings, "DEMO_FIXTURES_ENABLED", False):
             from backend.demo.demo_fixtures import is_demo_repository, run_demo_workflow
             if is_demo_repository(workflow.repository):
+                logger.warning("[DEMO] Demo fixtures enabled")
+                logger.warning(f"[DEMO] Repository matched:\n{workflow.repository}")
+                logger.warning("[DEMO] Starting deterministic flask-hello-world workflow")
+                logger.warning("[DEMO] Real executor bypassed")
+                logger.warning("[DEMO] Real verifier bypassed")
                 try:
                     result = run_demo_workflow(self, workflow)
+                    logger.warning("[DEMO] Demo workflow completed successfully")
                     active_workflows.dec()
                     workflow_total.labels(status=result.overall_status.value).inc()
                     workflow_duration_seconds.observe(time.perf_counter() - workflow_start_time)
@@ -401,6 +412,10 @@ class WorkflowOrchestrator:
                 finally:
                     with self._run_lock:
                         self._running_workflows.discard(workflow_id)
+            else:
+                logger.info(f"[DEMO] Repository did NOT match demo fixture: {workflow.repository}")
+        else:
+            logger.debug(f"[DEMO] Demo fixtures disabled, proceeding with real workflow")
 
 
         # Check if workflow was cancelled

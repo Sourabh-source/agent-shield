@@ -227,7 +227,9 @@ export default function StepTimeline({ steps, currentStep }: StepTimelineProps) 
     <div className="space-y-2">
       {steps.map((step, index) => {
         const isExpanded = expandedId === step.id;
-        const isActive = step.name === currentStep || step.id === currentStep;
+        const isActive =
+          (step.name === currentStep || step.id === currentStep) &&
+          ["RUNNING", "VERIFYING", "RECOVERING"].includes(step.status);
         const isVerified = step.status === "VERIFIED_SUCCESS" || step.status === "SUCCESS";
         const isFailed = step.status === "FAILED";
 

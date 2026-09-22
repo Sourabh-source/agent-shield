@@ -84,6 +84,12 @@ def start_workflow(
 
     owner_id = getattr(request.state, "owner_id", "default-owner")
 
+    if getattr(settings, "DEMO_FIXTURES_ENABLED", False):
+        from backend.demo.demo_fixtures import is_demo_repository
+        if is_demo_repository(repo_url):
+            logger.warning("[DEMO] Demo fixtures enabled")
+            logger.warning(f"[DEMO] Matched flask-hello-world fixture: {repo_url}")
+
     orchestrator = WorkflowOrchestrator()
     workflow = orchestrator.create_workflow(
         repo_url=repo_url,
