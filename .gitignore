@@ -29,6 +29,8 @@ ENV/
 # AgentGuard Runtime Workspaces & Data
 workspaces/
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 
 # Environment variables & secrets

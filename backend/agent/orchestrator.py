@@ -702,7 +702,7 @@ class WorkflowOrchestrator:
 
                                 # Postcondition evaluation: verify recovery actually succeeded
                                 postcond_met = recovery_planner.evaluate_postcondition(
-                                    rec_plan, executor.workspace_dir, step=step
+                                    rec_plan, executor.workspace_dir, step=step, execution_result=rec_result
                                 )
                                 rec_status = RecoveryOutcome.SUCCESS if (rec_result.exit_code == 0 and postcond_met) else RecoveryOutcome.FAILED
                                 recovery_attempts_total.labels(failure_type=rec_plan.failure_type, outcome=rec_status.value.lower()).inc()

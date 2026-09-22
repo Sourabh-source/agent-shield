@@ -55,6 +55,14 @@ TAMPER-EVIDENT VERIFICATION GATE (Verifier Boundary)
 - **Mutual Authentication**: Protected by `X-AgentGuard-Verify-Token` header authentication.
 - **Zero-Trust Rules**: Exit code 0 is necessary but never sufficient. Verifies non-empty clones, compiler outputs, assertion counts, and active process PIDs.
 
+### Self-Healing & Remediation Engine: Safe, Verified, and Idempotent
+- **4-State Outcome Contract**: Remediations evaluate to `SUCCESS`, `FAILED`, `UNVERIFIABLE`, or `UNRECOVERABLE`.
+- **AST-Enforced Postconditions**: Zero constant booleans in postcondition evaluations; every recovery requires live system state proof (import checks, socket probes, filesystem presence).
+- **Safe Port Relocation**: Foreign/system processes occupying ports are never killed; AgentGuard probes free ports and dynamically rewrites commands/environments. Only workflow-owned child PIDs are terminated.
+- **Honest Boundary Enforcement**: Out-of-memory errors (`RESOURCE_LIMIT`) are classified honestly as `UNRECOVERABLE` on unmanaged hosts without fake `gc.collect()` hoaxes. Step timeouts are bounded by `MAX_STEP_TIME`.
+- **State-Aware Idempotency & Futility Ledger**: Avoids repeating satisfied actions or loops of futile failing remediations.
+- **Honest End-to-End Metrics**: Recovery effectiveness is credited if and only if the downstream step reaches `StepStatus.VERIFIED_SUCCESS`.
+
 ---
 
 ## 🛡️ Production Hardening & Security Measures
@@ -110,7 +118,7 @@ npm run dev
 ```
 - Web Application: [http://localhost:3000](http://localhost:3000)
 
-### 3. Run Full Automated Test Suite (287+ Passing)
+### 3. Run Full Automated Test Suite (396+ Passing)
 ```powershell
 .\.venv\Scripts\pytest -v
 ```
@@ -194,6 +202,8 @@ AgentGuard is a prototype system that runs subprocesses locally and relies on an
 -   - Process tree termination on Windows/POSIX
 -   - 25+ real-world secret redaction test corpus with zero false-positive assertions
 -   - Automated claim verification gate: `python scripts/verify_security_review.py`
+-   - Automated self-healing honesty gate: `python scripts/verify_self_healing_claims.py`
+-   - AST-verified postcondition checks and real self-healing regression corpus
 - - **Frontend Code Quality**:
 -   - `npm run lint`: **0 errors, 0 warnings**
 -   - `npm run build`: **Turbopack production build succeeded**

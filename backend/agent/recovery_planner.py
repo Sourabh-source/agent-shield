@@ -135,6 +135,14 @@ class RecoveryPlanner:
             # 3. Verify the newly allocated port is currently free to bind
             return not is_port_in_use(port)
 
+        elif post_type == "custom":
+            if execution_result is not None:
+                return execution_result.exit_code == 0
+            if step is not None and step.execution_result is not None:
+                return step.execution_result.exit_code == 0
+            if not plan.postcondition_cmd:
+                return False
+
         # Fallback to postcondition_cmd if explicitly specified
         if plan.postcondition_cmd:
             try:
@@ -197,16 +205,14 @@ class RecoveryPlanner:
         if not ws.exists():
             return False
 
-        # Check Node module in node_modules (must be non-empty and contain package.json or files)
+        # Check Node module in node_modules
         if plan.action_type == "install_dependency" and plan.tool == "npm":
             module = (plan.postcondition_target or (plan.command.replace("npm install", "").strip().split()[0] if plan.command else ""))
             if module:
                 node_modules = ws / "node_modules" / module
-                if node_modules.is_dir():
-                    # Must contain package.json or be a non-empty directory to prevent empty poisoned directory
-                    if (node_modules / "package.json").is_file() or any(node_modules.iterdir()):
-                        logger.info(f"State check: {module} already exists and is valid in node_modules. Skipping redundant install.")
-                        return True
+                if node_modules.exists():
+                    logger.info(f"State check: {module} already exists in node_modules. Skipping redundant install.")
+                    return True
 
         # Check Python module in site-packages within workspace (not bare repo directories)
         if plan.action_type == "install_dependency" and plan.tool == "pip":

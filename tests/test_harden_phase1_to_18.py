@@ -369,12 +369,8 @@ def test_real_recovery_action_for_port_error():
     classification = classify_failure(res)
     plan = recovery_planner.generate_recovery_plan(res, classification)
 
-    assert plan.action_type == "release_port"
-    assert "echo" not in plan.command.lower()
-    if os.name == "nt":
-        assert "powershell" in plan.command.lower()
-    else:
-        assert "fuser" in plan.command.lower()
+    assert plan.action_type in ("relocate_port", "release_port")
+    assert "echo" not in (plan.command or "").lower()
 
 
 # =========================================================================

@@ -18,6 +18,18 @@ While AgentGuard has been significantly hardened against common web and command 
 - **No secrets management**: API keys and tokens are stored in the application configuration or environment variables, not in a dedicated secrets vault.
 - **Rate limiting is in-memory**: The sliding-window rate limit resets on server restart and is not distributed across nodes.
 
+## Self-Healing & Remediation Boundaries
+- **What AgentGuard CAN Remediate**:
+  - **Missing Dependencies**: Automatically resolves missing Python packages (`pip`) and Node.js modules (`npm`) in workspace environments, verified via `importlib` and filesystem checks.
+  - **Port Collisions**: Safely relocates port conflicts to newly probed free ports and rewrites step commands/environments dynamically.
+  - **Workflow-Owned Zombie Processes**: Reliably terminates orphaned background processes owned by the workflow (`spawned_pids`).
+  - **Transient Step Timeouts**: Doubles step timeout budget (`min(2*t, MAX_STEP_TIME)`) for operations requiring additional compilation or network time.
+- **What AgentGuard CANNOT Remediate**:
+  - **Host Resource Limits (OOM)**: Memory exhaustion (`RESOURCE_LIMIT`) cannot be resolved by the orchestrator on unmanaged host systems. AgentGuard classifies OOM honestly as `UNRECOVERABLE` and does not run deceptive in-process `gc.collect()`.
+  - **Timeout Ceilings**: Once a step reaches `MAX_STEP_TIME` (default 120s) or workflow exceeds `MAX_WORKFLOW_TIME` (default 600s), it cannot be extended further and halts honestly.
+  - **Foreign Process Ownership**: AgentGuard never kills processes outside its own spawned PID registry (e.g., system daemons, user databases). It relocates ports instead.
+  - **Arbitrary Source Bugs & Syntax Errors**: Inherent code flaws (`SyntaxError`, broken logic) cannot be magically healed without developer fixes; they are bounded by `MAX_RETRIES` (2) and halted.
+
 ## Claims Audit Findings
 A codebase audit for overclaiming language revealed the following:
 - Found **"guaranteed"** in `README.md` (e.g., "guaranteed killed") and `backend/agent/planner.py` ("guaranteed valid"). These have been downgraded in the documentation to reflect reality (e.g., "reliably terminated").
